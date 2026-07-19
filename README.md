@@ -1,200 +1,159 @@
-# 校园网自动重连 v4
+# 校园网自动重连
 
-一个不依赖第三方 Python 包的跨平台校园网监测与自动认证工具。
+适用于 Ubuntu 和 Windows 的校园网监测、断线重连与门户自动认证工具。
+
+## 为什么有这个脚本
+
+校园网经常会出现两种“看起来都像断网”的情况：
+
+1. Wi-Fi 信号短暂中断，电脑没有及时重新连接校园 Wi-Fi。
+2. Wi-Fi 仍显示已连接，但校园网认证已经过期，打开网页又要输入账号密码。
+
+这对需要长时间联网、远程连接、下载任务或无人值守电脑尤其麻烦。这个脚本因此而创建：它在后台检查指定校园网，发现外网不可用时自动重新认证，尽量减少反复打开登录页的操作。
+
+运行逻辑很简单：
+
+```text
+等待指定校园网 → 检查外网 → 掉线后登录门户 → 成功后继续监测
+```
+
+认证失败时会逐步延长重试间隔，避免错误密码造成高频请求。
 
 ## 支持范围
 
-| 项目 | 支持情况 |
+| 系统或门户 | 支持情况 |
 | --- | --- |
-| Ubuntu | 20.04、22.04、24.04（systemd + NetworkManager） |
-| Windows | Windows 10、Windows 11（登录触发的计划任务） |
-| 重庆大学 | 内置 CQU Dr.COM 一键预设 |
-| 其他 Dr.COM / ePortal 学校 | 配置登录 API 后使用 |
-| 深澜 SRUN 学校 | 支持 `get_challenge` + `srun_portal` 标准流程 |
-| 其他简单 Web 门户 | 可配置 GET/POST、请求字段、请求头和成功标志 |
+| Ubuntu | 20.04、22.04、24.04 |
+| Windows | Windows 10、Windows 11 |
+| 重庆大学 | 内置 CQU 一键配置 |
+| Dr.COM / ePortal | 支持常见登录接口 |
+| 深澜 SRUN | 支持 challenge 加密登录流程 |
+| 其他简单门户 | 可配置 GET/POST 请求 |
 
-不同学校并不存在统一的校园网登录协议。本工具通过“协议适配器 + 学校参数”扩展适用范围，而不是声称一个固定请求可以登录所有学校。验证码、短信/MFA、统一身份认证 SSO、802.1X 客户端、非标准加密插件目前不能用通用 HTTP 适配器自动处理。
+不同学校的接口并不完全相同，因此除重庆大学外，首次使用可能需要填写学校的登录地址和固定参数。
 
-## 主要改进
+## 下载
 
-- CQU 地址和参数不再写死在监测逻辑中。
-- Ubuntu 24.04 与原有 20.04/22.04 使用同一套标准库实现。
-- 同一个 `campus_autologin.py` 可在 Linux 和 Windows 运行。
-- 支持 Wi-Fi 和有线 NetworkManager 连接，并只在指定网络上提交账号。
-- 使用“精确 204 / 精确响应正文”检测外网，不会把校园门户的 200/302 页面误判为联网。
-- 连续失败确认、指数退避、TLS 证书校验、低权限服务和日志脱敏继续保留。
-- 可直接读取 v3 的 `/etc/cqu-autologin/config.json` 并导入 CQU 配置。
-- 按需求，交互向导输入密码时会明文显示，并额外打印一次供确认。
+从 [Releases](https://github.com/fan693/campus-network-autologin/releases/latest) 下载：
 
-## Ubuntu 安装
+- Ubuntu/Linux 建议下载 `tar.gz`。
+- Windows 建议下载 `zip`。
 
-安装前先连接目标校园 Wi-Fi 或校园有线网络，然后进入解压目录执行：
+下载后先解压，再进入解压目录安装。
+
+## Ubuntu 使用方法
+
+安装前先手动连接目标校园 Wi-Fi 或校园有线网络。
+
+### 1. 安装
 
 ```bash
 sudo bash install.sh
 ```
 
-配置向导中，重庆大学用户选择 `1`。安装器会启用当前 Wi-Fi 配置的 NetworkManager 自动连接，并注册 `campus-autologin.service`。
+安装器会识别当前网络。根据向导输入校园网账号、密码并选择认证类型；重庆大学用户选择 `1`。
 
-查看状态和日志：
+安装完成后会创建 `campus-autologin.service`，立即运行并开机自启。
+
+### 2. 查看运行状态
 
 ```bash
 sudo systemctl status campus-autologin --no-pager
 sudo journalctl -u campus-autologin -n 50 --no-pager
 ```
 
-重新配置账号、学校或门户：
+### 3. 修改配置或卸载
 
 ```bash
 sudo bash configure.sh
-```
-
-立即执行一次外网检查；掉线时跳过连续失败等待并立刻认证：
-
-```bash
-sudo systemctl stop campus-autologin
-sudo -u campus-autologin /usr/bin/python3 \
-  /usr/local/lib/campus-autologin/campus_autologin.py \
-  --config /etc/campus-autologin/config.json --once
-sudo systemctl start campus-autologin
-```
-
-卸载：
-
-```bash
 sudo bash uninstall.sh
 ```
 
-## Windows 安装
+旧版 CQU v3 配置会在安装时自动识别并导入。
 
-要求 Python 3.8 或更高版本。安装 Python 时勾选 `Add Python to PATH`。在解压目录打开 PowerShell，执行：
+## Windows 使用方法
+
+先安装 Python 3.8 或更高版本，并勾选 `Add Python to PATH`。然后在解压目录打开 PowerShell。
+
+### 1. 安装
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-不要求管理员权限。程序安装在 `%LOCALAPPDATA%\CampusAutoLogin`，配置和日志位于 `%APPDATA%\CampusAutoLogin`。计划任务 `CampusNetworkAutoLogin` 会在当前用户登录 Windows 后启动，并持续监测指定网络。
+根据向导输入账号、密码并选择认证类型。安装不要求管理员权限。
 
-重新配置和单次测试：
+程序会注册计划任务 `CampusNetworkAutoLogin`，当前用户登录 Windows 后自动运行。
+
+### 2. 查看日志或立即测试
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\configure.ps1
+Get-Content "$env:APPDATA\CampusAutoLogin\campus-autologin.log" -Tail 50
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\test-once.ps1
 ```
 
-查看任务与日志：
+### 3. 修改配置或卸载
 
 ```powershell
-Get-ScheduledTask -TaskName CampusNetworkAutoLogin
-Get-Content "$env:APPDATA\CampusAutoLogin\campus-autologin.log" -Tail 50
-```
-
-卸载：
-
-```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\configure.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1
 ```
 
-## 其他学校怎么选
+## 认证类型怎么选
 
-### Dr.COM / ePortal
+| 向导选项 | 适用情况 | 需要填写 |
+| --- | --- | --- |
+| `1` | 重庆大学 CQU | 账号、密码 |
+| `2` | Dr.COM / ePortal | 登录 API URL，通常以 `/eportal/portal/login` 结尾 |
+| `3` | 深澜 SRUN | 认证服务器地址和 `ac_id` |
+| `4` | 简单 GET/POST 门户 | URL、请求字段和成功标志 |
 
-登录请求通常包含 `user_account`、`user_password`、`wlan_user_ip`，URL 常以 `/eportal/portal/login` 结尾。向导选择 `2`，输入完整登录 API URL。多数版本的账号前缀是 `,0,`；如果门户直接接收账号，前缀输入 `-`。
+账号需要运营商后缀时，直接输入完整账号，例如 `20240001@cmcc`。
 
-如果运营商由账号后缀区分，请把后缀直接写在账号中，例如 `20240001@cmcc`，不要写入脚本。
+不知道学校使用哪一种时：
 
-### 深澜 SRUN
+1. 保持校园 Wi-Fi 已连接，但先退出校园网认证。
+2. 浏览器打开学校登录页，按 `F12`，在 `Network` 中保留日志。
+3. 手动登录一次，查看登录请求 URL：出现 `eportal/portal/login` 通常是 Dr.COM；出现 `get_challenge` 和 `srun_portal` 通常是 SRUN。
 
-门户通常会请求 `/cgi-bin/get_challenge`，随后请求 `/cgi-bin/srun_portal`。向导选择 `3`，输入认证服务器 base URL（例如 `http://10.0.0.55`）和登录页中的 `ac_id`。
-
-本实现包含 HMAC-MD5、SRBX1/XXTEA、定制 Base64 和 SHA-1 校验流程。不同部署可能修改 Base64 字母表、API 路径、`n`、`type` 或 `enc_ver`；向导允许修改常用参数，示例见 `examples/srun.json`。
-
-### 通用 GET/POST
-
-向导选择 `4`。从学校登录请求中填写：
-
-- 登录 URL 和 GET/POST 方法；
-- 请求参数 JSON；
-- 可选请求头 JSON；
-- 登录成功时响应正文中确定存在的字符串。
-
-可用占位符为 `{username}`、`{password}`、`{password_base64}`、`{ipv4}`、`{ipv6}`、`{network_name}`、`{timestamp}`。例如：
-
-```json
-{
-  "action": "login",
-  "username": "{username}",
-  "password": "{password}",
-  "user_ip": "{ipv4}"
-}
-```
-
-完整示例见 `examples/generic-post.json`。
-
-## 如何确认学校的认证类型
-
-1. 先断开门户认证，但保持校园 Wi-Fi/网线已连接。
-2. 浏览器打开学校官方登录页，按 `F12` 进入“网络/Network”，勾选保留日志。
-3. 手动登录一次，查看包含账号字段的请求名称、URL、方法、参数和响应。
-4. 只记录字段名、固定参数和成功响应标志；不要把真实密码、Cookie 或 token 发给别人。
-5. 优先选择 Dr.COM 或 SRUN 适配器，只有简单表单才使用通用适配器。
-
-门户参数升级后，学校可能改变接口。此时先用 `--once` / `test-once.ps1` 查看脱敏日志，再重新核对浏览器中的官方登录请求。
+不要公开真实密码、Cookie 或临时 token。配置示例位于 [`examples`](examples/) 目录。
 
 ## 密码与安全
 
-自动登录必须能读取凭据，因此密码会明文保存在本机配置文件中。Linux 文件权限为 `640`，仅 root 和无登录权限的 `campus-autologin` 服务账户可读；Windows 安装器会移除继承权限，只授予当前 Windows 用户。
+- 按本项目需求，配置向导输入密码时会直接显示，并再次打印供确认。
+- 自动登录必须保存密码。Linux 只允许 root 和专用服务账户读取；Windows 只授权当前用户读取。
+- 日志会隐藏账号、密码、URL 编码密码和 Base64 密码。
+- HTTPS 门户始终校验证书。若学校只提供 HTTP，密码在传输中不受 TLS 保护，程序会输出警告。
+- 本工具只恢复正常校园网认证，不绕过终端数量、计费或访问控制。
 
-按本版本需求，配置向导不会隐藏密码。终端输入和“你刚才输入的密码”都清晰可见，但不会进入命令历史。请避免旁观、投屏和录屏环境。运行日志仍会脱敏账号、密码、URL 编码密码和 Base64 密码。
+## 常见问题
 
-HTTPS 门户始终校验证书，程序没有“忽略证书”选项。很多学校的旧门户只有 HTTP，此时密码在传输途中没有 TLS 保护，程序会明确写入警告；应优先向学校确认 HTTPS 地址。
+### 一直显示 `waiting for network`
 
-本工具只恢复本机正常账号认证，不绕过终端数量、计费、访问控制或学校网络规定。
+当前连接名称或网卡与安装时不同。重新运行 `configure.sh` 或 `configure.ps1`。
 
-## 故障排查
-
-### 一直提示 waiting for network
-
-Ubuntu 查看活动连接：
+Ubuntu 可先查看活动连接：
 
 ```bash
 nmcli -t -f NAME,TYPE,DEVICE connection show --active
 ```
 
-Windows 查看当前网络配置：
-
-```powershell
-Get-NetConnectionProfile | Format-Table Name,InterfaceAlias,IPv4Connectivity
-```
-
-名称或网卡发生变化后重新运行配置向导。
-
 ### 登录被拒绝
 
-先确认账号后缀、`ac_id`、登录 URL、请求方法和成功标志。通用适配器必须使用响应中稳定且只代表成功的字符串，不能使用网页标题或通用的 `200 OK`。
+检查账号后缀、密码、登录 URL 和 `ac_id`。然后执行单次测试并查看脱敏日志。
 
-### SRUN challenge 失败
+### 学校有验证码、短信或统一身份认证
 
-确认 base URL 能在未认证状态访问，并且浏览器确实请求 `get_challenge`。如果登录页加载的 JavaScript 给出了不同的 64 字符 Base64 字母表，在向导中替换默认值。
+验证码、MFA、复杂 SSO、802.1X 和学校修改过的专有协议目前不能自动处理。
 
-### TLS 校验失败
+## 项目说明
 
-Ubuntu 检查时间和 CA：
+核心程序只使用 Python 标准库，不需要安装 `requests` 等第三方包。协议参考、许可与项目边界见 [`NOTICE.md`](NOTICE.md)。
 
-```bash
-timedatectl status
-sudo apt update
-sudo apt install --reinstall ca-certificates
-```
-
-Windows 确认系统时间正确并安装学校要求的受信任证书。不要把 `https://` 改成来源不明的 `http://` 来规避错误。
-
-## 开发验证
+本地验证命令：
 
 ```bash
-python3 -m py_compile campus_autologin.py configure.py
 python3 -m unittest discover -s tests -v
+python3 -m py_compile campus_autologin.py configure.py
 bash -n install.sh configure.sh uninstall.sh
 ```
-
-协议和参考来源见 `NOTICE.md`。
