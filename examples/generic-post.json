@@ -1,0 +1,30 @@
+{
+  "version": 4,
+  "username": "替换为账号",
+  "password": "替换为密码",
+  "network_name": "Campus-WiFi",
+  "interface": "wlan0 或 Wi-Fi",
+  "portal": {
+    "type": "generic",
+    "login_url": "https://portal.example.edu/api/login",
+    "method": "POST",
+    "parameters": {
+      "action": "login",
+      "username": "{username}",
+      "password": "{password}",
+      "user_ip": "{ipv4}"
+    },
+    "headers": {
+      "X-Requested-With": "XMLHttpRequest"
+    },
+    "success_contains": ["login_success"],
+    "already_online_contains": ["already_online"]
+  },
+  "online_interval": 30,
+  "offline_interval": 10,
+  "timeout": 5,
+  "failure_threshold": 2,
+  "connectivity_checks": [
+    {"url": "https://www.gstatic.com/generate_204", "status": 204}
+  ]
+}

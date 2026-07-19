@@ -1,0 +1,22 @@
+{
+  "version": 4,
+  "username": "20240001@运营商后缀可选",
+  "password": "替换为密码",
+  "network_name": "Campus-WiFi",
+  "interface": "wlan0 或 Wi-Fi",
+  "portal": {
+    "type": "drcom",
+    "login_url": "https://portal.example.edu/eportal/portal/login",
+    "account_prefix": ",0,",
+    "ac_ip": "",
+    "ac_name": "",
+    "mac": "000000000000"
+  },
+  "online_interval": 30,
+  "offline_interval": 10,
+  "timeout": 5,
+  "failure_threshold": 2,
+  "connectivity_checks": [
+    {"url": "https://www.gstatic.com/generate_204", "status": 204}
+  ]
+}

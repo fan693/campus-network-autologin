@@ -1,0 +1,23 @@
+{
+  "version": 4,
+  "username": "20240001@运营商后缀可选",
+  "password": "替换为密码",
+  "network_name": "Campus-WiFi",
+  "interface": "wlan0 或 Wi-Fi",
+  "portal": {
+    "type": "srun",
+    "base_url": "http://10.0.0.55",
+    "ac_id": "1",
+    "n": "200",
+    "type_value": "1",
+    "enc_ver": "srun_bx1",
+    "base64_alphabet": "LVoJPiCN2R8G90yg+hmFHuacZ1OWMnrsSTXkYpUq/3dlbfKwv6xztjI7DeBE45QA"
+  },
+  "online_interval": 30,
+  "offline_interval": 10,
+  "timeout": 5,
+  "failure_threshold": 2,
+  "connectivity_checks": [
+    {"url": "https://www.gstatic.com/generate_204", "status": 204}
+  ]
+}

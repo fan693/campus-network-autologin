@@ -1,0 +1,20 @@
+{
+  "version": 4,
+  "username": "替换为校园网账号",
+  "password": "替换为校园网密码",
+  "network_name": "替换为 NetworkManager 或 Windows 显示的连接名",
+  "interface": "替换为网卡名",
+  "portal": {
+    "type": "drcom",
+    "login_url": "https://login.cqu.edu.cn:802/eportal/portal/login",
+    "account_prefix": ",0,"
+  },
+  "online_interval": 30,
+  "offline_interval": 10,
+  "timeout": 5,
+  "failure_threshold": 2,
+  "connectivity_checks": [
+    {"url": "https://www.gstatic.com/generate_204", "status": 204},
+    {"url": "http://www.msftconnecttest.com/connecttest.txt", "status": 200, "body": "Microsoft Connect Test"}
+  ]
+}
