@@ -1,6 +1,6 @@
 # 校园网自动重连
 
-适用于 Ubuntu 和 Windows 的校园网监测、断线重连与门户自动认证工具。
+适用于 Ubuntu 和 Windows 的校园网监测、断线重连、门户自动认证与远程控制软件恢复工具。
 
 ## 为什么有这个脚本
 
@@ -9,12 +9,12 @@
 1. Wi-Fi 信号短暂中断，电脑没有及时重新连接校园 Wi-Fi。
 2. Wi-Fi 仍显示已连接，但校园网认证已经过期，打开网页又要输入账号密码。
 
-这对需要长时间联网、远程连接、下载任务或无人值守电脑尤其麻烦。这个脚本因此而创建：它在后台检查指定校园网，发现外网不可用时自动重新认证，尽量减少反复打开登录页的操作。
+这对需要长时间联网、远程连接、下载任务或无人值守电脑尤其麻烦。即使校园网已经恢复，ToDesk、向日葵等远程控制客户端有时仍停留在离线状态。这个项目因此同时处理两层问题：先恢复校园网认证，再刷新已经安装的远程控制客户端。
 
 运行逻辑很简单：
 
 ```text
-等待指定校园网 → 检查外网 → 掉线后登录门户 → 成功后继续监测
+等待指定校园网 → 检查外网 → 掉线后登录门户 → 网络恢复 → 刷新远程控制客户端
 ```
 
 认证失败时会逐步延长重试间隔，避免错误密码造成高频请求。
@@ -29,6 +29,18 @@
 | Dr.COM / ePortal | 支持常见登录接口 |
 | 深澜 SRUN | 支持 challenge 加密登录流程 |
 | 其他简单门户 | 可配置 GET/POST 请求 |
+
+远程控制软件恢复支持以下客户端：
+
+| 客户端 | Ubuntu | Windows |
+| --- | --- | --- |
+| ToDesk | 支持 | 支持 |
+| 向日葵 Sunlogin | 支持 | 支持 |
+| AnyDesk | 支持 | 支持 |
+| RustDesk | 支持 | 支持 |
+| TeamViewer | 支持 | 支持 |
+
+安装器会检查常见安装路径、Linux 桌面启动项和 Windows 卸载注册表。只为实际检测到的客户端启用恢复；没有安装上述软件时，不会创建远程恢复服务或计划任务。
 
 不同学校的接口并不完全相同，因此除重庆大学外，首次使用可能需要填写学校的登录地址和固定参数。
 
@@ -53,13 +65,15 @@ sudo bash install.sh
 
 安装器会识别当前网络。根据向导输入校园网账号、密码并选择认证类型；重庆大学用户选择 `1`。
 
-安装完成后会创建 `campus-autologin.service`，立即运行并开机自启。
+安装完成后会创建 `campus-autologin.service`，立即运行并开机自启。如果安装器检测到支持的远程控制软件，还会为当前桌面用户创建 `campus-remote-recovery.service`。
 
 ### 2. 查看运行状态
 
 ```bash
 sudo systemctl status campus-autologin --no-pager
 sudo journalctl -u campus-autologin -n 50 --no-pager
+systemctl --user status campus-remote-recovery --no-pager
+journalctl --user -u campus-remote-recovery -n 50 --no-pager
 ```
 
 ### 3. 修改配置或卸载
@@ -83,12 +97,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 
 根据向导输入账号、密码并选择认证类型。安装不要求管理员权限。
 
-程序会注册计划任务 `CampusNetworkAutoLogin`，当前用户登录 Windows 后自动运行。
+程序会注册计划任务 `CampusNetworkAutoLogin`，当前用户登录 Windows 后自动运行。如果检测到支持的远程控制软件，还会注册 `CampusRemoteRecovery`。
 
 ### 2. 查看日志或立即测试
 
 ```powershell
 Get-Content "$env:APPDATA\CampusAutoLogin\campus-autologin.log" -Tail 50
+Get-Content "$env:APPDATA\CampusAutoLogin\remote-recovery.log" -Tail 50
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\test-once.ps1
 ```
 
@@ -124,9 +139,20 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1
 - 自动登录必须保存密码。Linux 只允许 root 和专用服务账户读取；Windows 只授权当前用户读取。
 - 日志会隐藏账号、密码、URL 编码密码和 Base64 密码。
 - HTTPS 门户始终校验证书。若学校只提供 HTTP，密码在传输中不受 TLS 保护，程序会输出警告。
+- 远程恢复模块只读取本机安装路径和进程名称，不读取 ToDesk、向日葵等客户端的账号、密码或设备验证码。
 - 本工具只恢复正常校园网认证，不绕过终端数量、计费或访问控制。
 
 ## 常见问题
+
+### 远程软件会在什么情况下重启
+
+恢复模块会连续确认断网和联网，过滤单次探测失败。只有确认网络从离线恢复到在线后，才重新打开检测到的远程控制客户端；联网正常但客户端进程意外退出时，也会重新启动。两次恢复操作默认至少间隔 180 秒，避免网络抖动造成反复重启。
+
+安装或服务刚启动时不会重启正在运行的远程客户端，因此不会因为重新安装本项目而主动断开当前远程会话。
+
+### 已经安装远程软件但没有检测到
+
+Ubuntu 先确认应用的 `.desktop` 启动项位于标准应用目录，或可执行文件位于常见安装路径。Windows 先确认软件出现在“已安装的应用”中。便携版或自定义安装目录可在项目中提交路径适配；恢复模块不会通过全盘扫描寻找程序。
 
 ### 一直显示 `waiting for network`
 
@@ -154,6 +180,6 @@ nmcli -t -f NAME,TYPE,DEVICE connection show --active
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile campus_autologin.py configure.py
+python3 -m py_compile campus_autologin.py configure.py remote_recovery.py
 bash -n install.sh configure.sh uninstall.sh
 ```

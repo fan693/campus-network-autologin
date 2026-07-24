@@ -3,6 +3,7 @@ param()
 
 $ErrorActionPreference = "Stop"
 $TaskName = "CampusNetworkAutoLogin"
+$RemoteTaskName = "CampusRemoteRecovery"
 $InstallDir = Join-Path $env:LOCALAPPDATA "CampusAutoLogin"
 $ConfigDir = Join-Path $env:APPDATA "CampusAutoLogin"
 $ConfigFile = Join-Path $ConfigDir "config.json"
@@ -43,6 +44,7 @@ New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "campus_autologin.py") -Destination $InstallDir -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "configure.py") -Destination $InstallDir -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "remote_recovery.py") -Destination $InstallDir -Force
 
 $configureScript = Join-Path $InstallDir "configure.py"
 $configureArgs = @($pythonCommand.Prefix) + @($configureScript, "--output", $ConfigFile)
@@ -101,6 +103,42 @@ Register-ScheduledTask `
     -Settings $settings `
     -Force | Out-Null
 Start-ScheduledTask -TaskName $TaskName
+
+$remoteProgram = Join-Path $InstallDir "remote_recovery.py"
+$detectArgs = @($pythonCommand.Prefix) + @($remoteProgram, "--detect")
+& $pythonCommand.Executable @detectArgs
+$remoteDetectionExitCode = $LASTEXITCODE
+
+Stop-ScheduledTask -TaskName $RemoteTaskName -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName $RemoteTaskName -Confirm:$false -ErrorAction SilentlyContinue
+if ($remoteDetectionExitCode -eq 0) {
+    $remoteLog = Join-Path $ConfigDir "remote-recovery.log"
+    $quotedRemoteProgram = '"' + $remoteProgram + '"'
+    $quotedRemoteLog = '"' + $remoteLog + '"'
+    $remoteActionArgs = (@($pythonCommand.Prefix) + @(
+        $quotedRemoteProgram,
+        "--log-file",
+        $quotedRemoteLog
+    )) -join " "
+    $remoteAction = New-ScheduledTaskAction `
+        -Execute $pythonCommand.BackgroundExecutable `
+        -Argument $remoteActionArgs `
+        -WorkingDirectory $InstallDir
+    Register-ScheduledTask `
+        -TaskName $RemoteTaskName `
+        -Description "Restart installed remote-control clients after campus network recovery." `
+        -Action $remoteAction `
+        -Trigger $trigger `
+        -Principal $principal `
+        -Settings $settings `
+        -Force | Out-Null
+    Start-ScheduledTask -TaskName $RemoteTaskName
+    Write-Host "Remote-control software detected. Automatic recovery is enabled."
+} elseif ($remoteDetectionExitCode -eq 3) {
+    Write-Host "No supported remote-control software was detected; recovery was skipped."
+} else {
+    Write-Warning "Remote-control software detection failed with exit code $remoteDetectionExitCode."
+}
 
 Write-Host ""
 Write-Host "Installation completed for Windows 10 / 11. The task starts at user logon."

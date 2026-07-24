@@ -1,0 +1,13 @@
+[Unit]
+Description=Remote-control client recovery after campus network outages
+After=graphical-session.target network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/lib/campus-autologin/remote_recovery.py --log-file %h/.local/state/campus-autologin/remote-recovery.log
+Restart=on-failure
+RestartSec=15s
+RestartPreventExitStatus=3
+
+[Install]
+WantedBy=default.target
