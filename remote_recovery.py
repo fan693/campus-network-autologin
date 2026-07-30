@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Restart installed remote-control clients after internet connectivity returns."""
+"""Keep detected remote-control clients available while the internet is online."""
 
 from __future__ import annotations
 
@@ -11,10 +11,13 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Mapping, Optional, Sequence
 
@@ -34,6 +37,8 @@ except ImportError:  # Windows
 APP_NAME = "campus-remote-recovery"
 RUNNING = True
 LOG_FILE: Optional[Path] = None
+TODESK_LOG_DIR = Path(os.environ.get("TODESK_LOG_DIR", "/var/log/todesk"))
+TODESK_CONTROL_PORT = 37600
 REMOTE_CHECKS = tuple(
     ConnectivityCheck(url=item["url"], status=item["status"], body=item.get("body"))
     for item in DEFAULT_CHECKS
@@ -54,6 +59,8 @@ class AppDefinition:
     linux_paths: tuple[str, ...]
     windows_paths: tuple[tuple[str, str], ...]
     executable_names: tuple[str, ...]
+    linux_services: tuple[str, ...] = ()
+    windows_services: tuple[str, ...] = ()
     environment: Mapping[str, str] = field(default_factory=dict)
 
 
@@ -71,6 +78,13 @@ class RemoteApp:
         return self.definition.display_name
 
 
+@dataclass(frozen=True)
+class HealthStatus:
+    state: str
+    reason: str
+    failure_threshold: int
+
+
 APP_DEFINITIONS = (
     AppDefinition(
         key="todesk",
@@ -84,6 +98,8 @@ APP_DEFINITIONS = (
             ("LOCALAPPDATA", "ToDesk/ToDesk.exe"),
         ),
         executable_names=("ToDesk.exe",),
+        linux_services=("todeskd.service",),
+        windows_services=("ToDesk_Service", "ToDeskService"),
         environment={
             "LIBVA_DRIVER_NAME": "iHD",
             "LIBVA_DRIVERS_PATH": "/opt/todesk/bin",
@@ -104,6 +120,8 @@ APP_DEFINITIONS = (
             ("ProgramFiles(x86)", "Oray/SunLogin/SunloginClient/SunloginClient.exe"),
         ),
         executable_names=("SunloginClient.exe",),
+        linux_services=("runsunloginclient.service", "sunloginclient.service"),
+        windows_services=("SunloginService",),
     ),
     AppDefinition(
         key="anydesk",
@@ -117,6 +135,8 @@ APP_DEFINITIONS = (
             ("APPDATA", "AnyDesk/AnyDesk.exe"),
         ),
         executable_names=("AnyDesk.exe",),
+        linux_services=("anydesk.service",),
+        windows_services=("AnyDesk",),
     ),
     AppDefinition(
         key="rustdesk",
@@ -130,6 +150,8 @@ APP_DEFINITIONS = (
             ("LOCALAPPDATA", "RustDesk/RustDesk.exe"),
         ),
         executable_names=("RustDesk.exe",),
+        linux_services=("rustdesk.service",),
+        windows_services=("RustDesk",),
     ),
     AppDefinition(
         key="teamviewer",
@@ -142,6 +164,8 @@ APP_DEFINITIONS = (
             ("ProgramFiles(x86)", "TeamViewer/TeamViewer.exe"),
         ),
         executable_names=("TeamViewer.exe",),
+        linux_services=("teamviewerd.service",),
+        windows_services=("TeamViewer",),
     ),
 )
 
@@ -385,6 +409,220 @@ def app_running(app: RemoteApp, process_names: Optional[set[str]] = None) -> boo
     return any(name.casefold() in running for name in app.definition.process_names)
 
 
+def latest_todesk_service_log(log_dir: Path = TODESK_LOG_DIR) -> Optional[Path]:
+    try:
+        candidates = [path for path in log_dir.glob("service*.log") if path.is_file()]
+        return max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None
+    except OSError:
+        return None
+
+
+def parse_todesk_center_log(path: Path) -> tuple[str, Optional[str]]:
+    state = "unknown"
+    endpoint: Optional[str] = None
+    endpoint_pattern = re.compile(
+        r"client create connect to comet.*\bip=([^\s]+)\s+port=(\d+)"
+    )
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as source:
+            lines = deque(source, maxlen=5000)
+    except OSError:
+        return state, endpoint
+
+    for line in lines:
+        match = endpoint_pattern.search(line)
+        if match:
+            endpoint = f"{match.group(1)}:{match.group(2)}"
+        if "CCenterClientr doAuth connect AuthOk" in line:
+            state = "online"
+        elif "center client disconnect!!" in line:
+            state = "offline"
+    return state, endpoint
+
+
+def established_tcp_peers() -> set[str]:
+    try:
+        result = subprocess.run(
+            ["ss", "-Htn", "state", "established"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    if result.returncode != 0:
+        return set()
+    return {line.split()[-1] for line in result.stdout.splitlines() if line.split()}
+
+
+def todesk_center_state(
+    log_dir: Path = TODESK_LOG_DIR,
+    peers: Optional[set[str]] = None,
+) -> str:
+    service_log = latest_todesk_service_log(log_dir)
+    if service_log is None:
+        return "unknown"
+    log_state, endpoint = parse_todesk_center_log(service_log)
+    if log_state != "online":
+        return log_state
+    if endpoint is None:
+        return "unknown"
+    active_peers = established_tcp_peers() if peers is None else peers
+    return "online" if endpoint in active_peers else "offline"
+
+
+def local_port_open(port: int, timeout: float = 1.0) -> bool:
+    try:
+        result = subprocess.run(
+            ["ss", "-Hltn"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            suffix = f":{port}"
+            return any(
+                any(field.endswith(suffix) for field in line.split())
+                for line in result.stdout.splitlines()
+            )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+@lru_cache(maxsize=None)
+def installed_service_name(
+    service_names: tuple[str, ...],
+    system: Optional[str] = None,
+) -> Optional[str]:
+    current = system or platform.system()
+    for service_name in service_names:
+        try:
+            if current == "Linux":
+                result = subprocess.run(
+                    ["systemctl", "show", service_name, "--property", "LoadState", "--value"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if result.returncode == 0 and result.stdout.strip() == "loaded":
+                    return service_name
+            elif current == "Windows":
+                result = subprocess.run(
+                    ["sc.exe", "query", service_name],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if result.returncode == 0:
+                    return service_name
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+    return None
+
+
+def app_service_state(app: RemoteApp) -> str:
+    current = platform.system()
+    service_names = (
+        app.definition.linux_services
+        if current == "Linux"
+        else app.definition.windows_services
+        if current == "Windows"
+        else ()
+    )
+    service_name = installed_service_name(service_names, current)
+    if service_name is None:
+        return "unknown"
+    try:
+        if current == "Linux":
+            result = subprocess.run(
+                ["systemctl", "is-active", service_name],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return "online" if result.returncode == 0 and result.stdout.strip() == "active" else "offline"
+        result = subprocess.run(
+            ["sc.exe", "query", service_name],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return "offline"
+        return "online" if "RUNNING" in result.stdout.upper() else "offline"
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+
+
+def command_connection_state(app: RemoteApp) -> str:
+    if app.key != "anydesk":
+        return "unknown"
+    try:
+        result = subprocess.run(
+            [app.command[0], "--get-status"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    if result.returncode != 0:
+        return "unknown"
+    output = f"{result.stdout}\n{result.stderr}".casefold()
+    if "online" in output:
+        return "online"
+    if any(marker in output for marker in ("offline", "disconnected", "not connected")):
+        return "offline"
+    return "unknown"
+
+
+def has_deep_health_probe(app: RemoteApp) -> bool:
+    if platform.system() == "Linux" and app.key == "todesk":
+        return latest_todesk_service_log() is not None
+    if app.key == "anydesk":
+        return command_connection_state(app) != "unknown"
+    return False
+
+
+def app_health(app: RemoteApp, process_names: Optional[set[str]] = None) -> HealthStatus:
+    if not app_running(app, process_names):
+        return HealthStatus("unhealthy", "process is not running", 3)
+    service = app_service_state(app)
+    if service == "offline":
+        return HealthStatus("unhealthy", "background service is not running", 3)
+    if platform.system() == "Linux" and app.key == "todesk":
+        if not local_port_open(TODESK_CONTROL_PORT):
+            return HealthStatus(
+                "unhealthy",
+                f"local control port {TODESK_CONTROL_PORT} is unavailable",
+                3,
+            )
+        center = todesk_center_state()
+        if center == "online":
+            return HealthStatus("healthy", "center authentication and socket are online", 1)
+        if center == "offline":
+            return HealthStatus("unhealthy", "center authentication or socket is offline", 6)
+        return HealthStatus("unknown", "center state is unavailable", 6)
+    connection = command_connection_state(app)
+    if connection == "offline":
+        return HealthStatus("unhealthy", "vendor status reports offline", 6)
+    if connection == "online":
+        return HealthStatus("healthy", "vendor status reports online", 1)
+    return HealthStatus("healthy", "process and background service are running", 1)
+
+
 def stop_app(app: RemoteApp) -> None:
     if platform.system() == "Windows":
         for process_name in app.definition.process_names:
@@ -414,16 +652,83 @@ def stop_app(app: RemoteApp) -> None:
         if not app_running(app):
             return
         time.sleep(1)
+    for process_name in app.definition.process_names:
+        try:
+            subprocess.run(
+                ["pkill", "-KILL", "-x", process_name],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+    time.sleep(1)
+
+
+def graphical_environment(environ: Optional[Mapping[str, str]] = None) -> dict[str, str]:
+    environment = dict(os.environ if environ is None else environ)
+    if platform.system() != "Linux":
+        return environment
+
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "show-environment"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        result = None
+    allowed = {
+        "DISPLAY",
+        "XAUTHORITY",
+        "WAYLAND_DISPLAY",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "XDG_RUNTIME_DIR",
+        "XDG_SESSION_TYPE",
+    }
+    if result is not None and result.returncode == 0:
+        for line in result.stdout.splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key in allowed and value:
+                environment[key] = value
+
+    runtime_dir = environment.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    if not environment.get("DISPLAY") and Path("/tmp/.X11-unix/X0").exists():
+        environment["DISPLAY"] = ":0"
+    authority = environment.get("XAUTHORITY", "")
+    if not authority or not Path(authority).is_file():
+        for candidate in (Path(runtime_dir) / "gdm/Xauthority", Path.home() / ".Xauthority"):
+            if candidate.is_file() and os.access(candidate, os.R_OK):
+                environment["XAUTHORITY"] = str(candidate)
+                break
+    return environment
 
 
 def start_app(app: RemoteApp) -> bool:
-    environment = {**os.environ, **app.definition.environment}
+    environment = {**graphical_environment(), **app.definition.environment}
+    output: object = subprocess.DEVNULL
+    output_handle: Optional[object] = None
+    if LOG_FILE is not None:
+        startup_log = LOG_FILE.with_name(f"{app.key}-startup.log")
+        try:
+            startup_log.parent.mkdir(parents=True, exist_ok=True)
+            if startup_log.exists() and startup_log.stat().st_size >= 1_048_576:
+                backup = startup_log.with_suffix(startup_log.suffix + ".1")
+                backup.unlink(missing_ok=True)
+                startup_log.replace(backup)
+            output_handle = startup_log.open("a", encoding="utf-8")
+            output = output_handle
+        except OSError:
+            output_handle = None
     kwargs: dict[str, object] = {
         "cwd": str(Path(app.command[0]).parent),
         "env": environment,
         "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
+        "stdout": output,
+        "stderr": output,
     }
     if platform.system() == "Windows":
         kwargs["creationflags"] = (
@@ -437,6 +742,9 @@ def start_app(app: RemoteApp) -> bool:
     except OSError as exc:
         log(f"failed to start {app.display_name}: {exc}")
         return False
+    finally:
+        if output_handle is not None:
+            output_handle.close()
     log(f"started {app.display_name}")
     return True
 
@@ -445,6 +753,71 @@ def restart_app(app: RemoteApp, reason: str) -> bool:
     log(f"restarting {app.display_name}: {reason}")
     stop_app(app)
     return start_app(app)
+
+
+def wait_for_app_ready(app: RemoteApp, timeout: int = 60) -> bool:
+    deadline = time.monotonic() + timeout
+    while RUNNING and time.monotonic() < deadline:
+        status = app_health(app)
+        if status.state == "healthy":
+            log(f"{app.display_name} recovered: {status.reason}")
+            return True
+        if status.state == "unknown" and app_running(app):
+            log(f"{app.display_name} is running, but deep health is unavailable")
+            return True
+        interruptible_sleep(2)
+    log(f"{app.display_name} did not become healthy within {timeout} seconds")
+    return False
+
+
+def restart_app_service(app: RemoteApp) -> bool:
+    if platform.system() != "Linux":
+        return False
+    service_name = installed_service_name(app.definition.linux_services, "Linux")
+    if service_name is None:
+        return False
+    systemctl = "/usr/bin/systemctl"
+    if not Path(systemctl).is_file():
+        resolved = shutil.which("systemctl")
+        if resolved is None:
+            return False
+        systemctl = resolved
+    command = [systemctl, "restart", service_name]
+    if os.geteuid() != 0:
+        command = ["sudo", "-n", *command]
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    log(f"restarted {app.display_name} background service: {service_name}")
+    interruptible_sleep(3)
+    return True
+
+
+def recover_app(app: RemoteApp, reason: str, allow_service_restart: bool) -> tuple[bool, bool]:
+    if restart_app(app, reason) and wait_for_app_ready(app):
+        return True, False
+    if platform.system() != "Linux" or not allow_service_restart:
+        return False, False
+    service_name = installed_service_name(app.definition.linux_services, "Linux")
+    if service_name is None:
+        return False, False
+    log(f"{app.display_name} desktop recovery was insufficient; escalating to its background service")
+    if not restart_app_service(app):
+        log(f"unable to restart the {app.display_name} service; check the restricted privilege rule")
+        return False, False
+    return (
+        restart_app(app, f"{service_name} was restarted") and wait_for_app_ready(app),
+        True,
+    )
 
 
 def acquire_lock() -> Optional[object]:
@@ -473,6 +846,7 @@ def monitor(
     failure_threshold: int,
     recovery_threshold: int,
     cooldown: int,
+    service_cooldown: int,
 ) -> int:
     if not apps:
         log("no supported remote-control software detected; recovery is not needed")
@@ -487,6 +861,8 @@ def monitor(
     state = ConnectivityState(failure_threshold, recovery_threshold)
     opener = build_opener(follow_redirects=False)
     last_action = {app.key: 0.0 for app in apps}
+    health_failures = {app.key: 0 for app in apps}
+    last_service_restart = 0.0
 
     while RUNNING:
         online = internet_online(opener, ConnectivityConfig())
@@ -497,19 +873,39 @@ def monitor(
         elif event == "online":
             log("internet is online")
         elif event == "recovered":
-            log("internet recovered; refreshing detected remote-control clients")
+            log("internet recovered; checking detected remote-control clients")
             for app in apps:
-                if now - last_action[app.key] >= cooldown:
+                if (
+                    not has_deep_health_probe(app)
+                    and now - last_action[app.key] >= cooldown
+                ):
                     restart_app(app, "internet connection recovered")
                     last_action[app.key] = now
 
         if state.state == "online":
             processes = running_process_names()
             for app in apps:
-                if not app_running(app, processes) and now - last_action[app.key] >= cooldown:
-                    log(f"{app.display_name} is not running")
-                    start_app(app)
+                status = app_health(app, processes)
+                if status.state != "unhealthy":
+                    health_failures[app.key] = 0
+                    continue
+                health_failures[app.key] += 1
+                if health_failures[app.key] == 1:
+                    log(f"{app.display_name} health check failed: {status.reason}")
+                if (
+                    health_failures[app.key] >= status.failure_threshold
+                    and now - last_action[app.key] >= cooldown
+                ):
+                    allow_service_restart = now - last_service_restart >= service_cooldown
+                    _, service_restarted = recover_app(
+                        app,
+                        status.reason,
+                        allow_service_restart,
+                    )
                     last_action[app.key] = now
+                    if service_restarted:
+                        last_service_restart = now
+                    health_failures[app.key] = 0
 
         interval = online_interval if state.state == "online" else offline_interval
         interruptible_sleep(interval)
@@ -526,15 +922,20 @@ def bounded_int(value: str, minimum: int, maximum: int) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Remote-control software recovery monitor")
+    parser = argparse.ArgumentParser(description="Remote-control software availability monitor")
     parser.add_argument("--detect", action="store_true", help="list supported installed clients")
     parser.add_argument("--once", action="store_true", help="print current status and exit")
     parser.add_argument("--log-file", type=Path)
-    parser.add_argument("--online-interval", type=lambda value: bounded_int(value, 10, 3600), default=30)
+    parser.add_argument("--online-interval", type=lambda value: bounded_int(value, 10, 3600), default=15)
     parser.add_argument("--offline-interval", type=lambda value: bounded_int(value, 5, 600), default=10)
     parser.add_argument("--failure-threshold", type=lambda value: bounded_int(value, 1, 10), default=2)
     parser.add_argument("--recovery-threshold", type=lambda value: bounded_int(value, 1, 10), default=2)
     parser.add_argument("--cooldown", type=lambda value: bounded_int(value, 30, 3600), default=180)
+    parser.add_argument(
+        "--service-cooldown",
+        type=lambda value: bounded_int(value, 60, 7200),
+        default=900,
+    )
     return parser.parse_args()
 
 
@@ -549,10 +950,12 @@ def main() -> int:
         return 0 if apps else 3
     if args.once:
         processes = running_process_names()
+        healthy = True
         for app in apps:
-            state = "running" if app_running(app, processes) else "not running"
-            print(f"{app.display_name}: {state} ({app.command[0]})")
-        return 0 if apps else 3
+            status = app_health(app, processes)
+            print(f"{app.display_name}: {status.state} - {status.reason} ({app.command[0]})")
+            healthy = healthy and status.state != "unhealthy"
+        return (0 if healthy else 1) if apps else 3
     signal.signal(signal.SIGTERM, stop_handler)
     signal.signal(signal.SIGINT, stop_handler)
     return monitor(
@@ -562,6 +965,7 @@ def main() -> int:
         args.failure_threshold,
         args.recovery_threshold,
         args.cooldown,
+        args.service_cooldown,
     )
 
 

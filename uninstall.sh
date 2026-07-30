@@ -8,6 +8,7 @@ fi
 
 REMOTE_SERVICE_NAME="campus-remote-recovery.service"
 REMOTE_USER_FILE="/etc/campus-autologin/remote-user"
+REMOTE_SUDOERS_FILE="/etc/sudoers.d/campus-remote-recovery"
 
 if [[ -f "${REMOTE_USER_FILE}" ]]; then
   REMOTE_USER="$(head -n 1 "${REMOTE_USER_FILE}")"
@@ -23,8 +24,10 @@ if [[ -f "${REMOTE_USER_FILE}" ]]; then
     fi
     rm -f "${REMOTE_HOME}/.config/systemd/user/${REMOTE_SERVICE_NAME}"
     rm -f "${REMOTE_HOME}/.config/systemd/user/default.target.wants/${REMOTE_SERVICE_NAME}"
+    rm -f "${REMOTE_HOME}/.config/systemd/user/graphical-session.target.wants/${REMOTE_SERVICE_NAME}"
   fi
 fi
+rm -f "${REMOTE_SUDOERS_FILE}"
 
 systemctl disable --now campus-autologin.service 2>/dev/null || true
 rm -f /etc/systemd/system/campus-autologin.service

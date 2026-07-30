@@ -126,7 +126,7 @@ if ($remoteDetectionExitCode -eq 0) {
         -WorkingDirectory $InstallDir
     Register-ScheduledTask `
         -TaskName $RemoteTaskName `
-        -Description "Restart installed remote-control clients after campus network recovery." `
+        -Description "Keep detected remote-control clients available while the internet is online." `
         -Action $remoteAction `
         -Trigger $trigger `
         -Principal $principal `

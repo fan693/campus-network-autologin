@@ -8,6 +8,8 @@ CONFIG_FILE="${CONFIG_DIR}/config.json"
 SERVICE_FILE="/etc/systemd/system/campus-autologin.service"
 REMOTE_USER_FILE="${CONFIG_DIR}/remote-user"
 REMOTE_SERVICE_NAME="campus-remote-recovery.service"
+REMOTE_TARGET="graphical-session.target"
+REMOTE_SUDOERS_FILE="/etc/sudoers.d/campus-remote-recovery"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 desktop_user() {
@@ -44,6 +46,51 @@ remove_remote_service() {
   fi
   rm -f "${unit_dir}/${REMOTE_SERVICE_NAME}"
   rm -f "${unit_dir}/default.target.wants/${REMOTE_SERVICE_NAME}"
+  rm -f "${unit_dir}/${REMOTE_TARGET}.wants/${REMOTE_SERVICE_NAME}"
+}
+
+install_remote_privileges() {
+  local user_name="$1" detection="$2" systemctl_path temp_rule
+  local display_name candidate load_state
+  local -a candidates=() services=()
+  declare -A seen=()
+
+  while IFS=$'\t' read -r display_name _; do
+    case "${display_name}" in
+      ToDesk) candidates+=(todeskd.service) ;;
+      Sunlogin) candidates+=(runsunloginclient.service sunloginclient.service) ;;
+      AnyDesk) candidates+=(anydesk.service) ;;
+      RustDesk) candidates+=(rustdesk.service) ;;
+      TeamViewer) candidates+=(teamviewerd.service) ;;
+    esac
+  done <<< "${detection}"
+
+  for candidate in "${candidates[@]}"; do
+    [[ -z "${seen[${candidate}]:-}" ]] || continue
+    seen["${candidate}"]=1
+    load_state="$(systemctl show "${candidate}" --property LoadState --value 2>/dev/null || true)"
+    [[ "${load_state}" == "loaded" ]] && services+=("${candidate}")
+  done
+
+  if [[ "${#services[@]}" -eq 0 ]]; then
+    rm -f "${REMOTE_SUDOERS_FILE}"
+    return 0
+  fi
+
+  systemctl_path="$(command -v systemctl)"
+  temp_rule="$(mktemp)"
+  for candidate in "${services[@]}"; do
+    printf '%s ALL=(root) NOPASSWD: %s restart %s\n' \
+      "${user_name}" "${systemctl_path}" "${candidate}" >> "${temp_rule}"
+  done
+  chmod 0440 "${temp_rule}"
+  if ! visudo -cf "${temp_rule}" >/dev/null; then
+    rm -f "${temp_rule}"
+    echo "远程软件受限重启权限校验失败；将仅启用桌面客户端恢复。" >&2
+    return 0
+  fi
+  install -o root -g root -m 0440 "${temp_rule}" "${REMOTE_SUDOERS_FILE}"
+  rm -f "${temp_rule}"
 }
 
 install_remote_recovery() {
@@ -61,6 +108,7 @@ install_remote_recovery() {
     if [[ "${status}" -eq 3 ]]; then
       echo "未检测到支持的远程控制软件，跳过掉线恢复服务。"
       remove_remote_service "${user_name}"
+      rm -f "${REMOTE_SUDOERS_FILE}"
       rm -f "${REMOTE_USER_FILE}"
       return 0
     fi
@@ -68,15 +116,18 @@ install_remote_recovery() {
     return 0
   fi
 
+  install_remote_privileges "${user_name}" "${detection}"
+
   install -d -o "${user_name}" -g "${user_group}" -m 0755 "${unit_dir}"
   install -d -o "${user_name}" -g "${user_group}" -m 0755 \
-    "${unit_dir}/default.target.wants"
+    "${unit_dir}/${REMOTE_TARGET}.wants"
   install -o "${user_name}" -g "${user_group}" -m 0644 \
     "${SCRIPT_DIR}/${REMOTE_SERVICE_NAME}" "${unit_dir}/${REMOTE_SERVICE_NAME}"
+  rm -f "${unit_dir}/default.target.wants/${REMOTE_SERVICE_NAME}"
   ln -sfn "../${REMOTE_SERVICE_NAME}" \
-    "${unit_dir}/default.target.wants/${REMOTE_SERVICE_NAME}"
+    "${unit_dir}/${REMOTE_TARGET}.wants/${REMOTE_SERVICE_NAME}"
   chown -h "${user_name}:${user_group}" \
-    "${unit_dir}/default.target.wants/${REMOTE_SERVICE_NAME}"
+    "${unit_dir}/${REMOTE_TARGET}.wants/${REMOTE_SERVICE_NAME}"
   printf '%s\n' "${user_name}" > "${REMOTE_USER_FILE}"
   chmod 0644 "${REMOTE_USER_FILE}"
 
@@ -95,7 +146,7 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
-for command_name in python3 nmcli systemctl install runuser; do
+for command_name in python3 nmcli systemctl install runuser sudo visudo; do
   if ! command -v "${command_name}" >/dev/null 2>&1; then
     echo "缺少命令：${command_name}" >&2
     exit 1
