@@ -153,28 +153,31 @@ for command_name in python3 nmcli systemctl install runuser sudo visudo; do
   fi
 done
 
-ACTIVE_DEVICE="$({
-  LC_ALL=C nmcli -t -f DEVICE,TYPE,STATE device status |
-    awk -F: '$2 == "wifi" && $3 == "connected" {print $1; exit}'
-} || true)"
-if [[ -z "${ACTIVE_DEVICE}" ]]; then
-  ACTIVE_DEVICE="$({
-    LC_ALL=C nmcli -t -f DEVICE,TYPE,STATE device status |
-      awk -F: '$3 == "connected" && ($2 == "ethernet" || $2 == "wifi") {print $1; exit}'
-  } || true)"
-fi
-if [[ -z "${ACTIVE_DEVICE}" ]]; then
-  echo "没有检测到已连接的 Wi-Fi 或有线网络。" >&2
-  echo "请先连接目标校园网，再重新安装。" >&2
-  exit 1
-fi
+SELECTION_FILE="$(mktemp)"
+trap 'rm -f "${SELECTION_FILE}"' EXIT
+chmod 0600 "${SELECTION_FILE}"
+python3 "${SCRIPT_DIR}/select_network.py" --output "${SELECTION_FILE}"
 
-ACTIVE_CONNECTION="$(LC_ALL=C nmcli -g GENERAL.CONNECTION device show "${ACTIVE_DEVICE}")"
-ACTIVE_TYPE="$(LC_ALL=C nmcli -g GENERAL.TYPE device show "${ACTIVE_DEVICE}")"
-if [[ -z "${ACTIVE_CONNECTION}" || "${ACTIVE_CONNECTION}" == "--" ]]; then
-  echo "无法读取 ${ACTIVE_DEVICE} 当前使用的 NetworkManager 连接。" >&2
+mapfile -d '' -t NETWORK_SELECTION < <(
+  python3 - "${SELECTION_FILE}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    selected = json.load(handle)
+for key in ("connection", "interface", "network_type"):
+    sys.stdout.write(str(selected[key]) + "\0")
+PY
+)
+if [[ "${#NETWORK_SELECTION[@]}" -ne 3 ]]; then
+  echo "无法读取网络选择结果。" >&2
   exit 1
 fi
+ACTIVE_CONNECTION="${NETWORK_SELECTION[0]}"
+ACTIVE_DEVICE="${NETWORK_SELECTION[1]}"
+ACTIVE_TYPE="${NETWORK_SELECTION[2]}"
+rm -f "${SELECTION_FILE}"
+trap - EXIT
 
 echo "检测到连接：${ACTIVE_CONNECTION}"
 echo "检测到网卡：${ACTIVE_DEVICE}"
@@ -196,18 +199,21 @@ CONFIG_ARGS=(
   --output "${TEMP_CONFIG}"
   --network-name "${ACTIVE_CONNECTION}"
   --interface "${ACTIVE_DEVICE}"
+  --lock-network
 )
 if [[ -n "${EXISTING_CONFIG}" ]]; then
   CONFIG_ARGS+=(--existing "${EXISTING_CONFIG}")
 fi
 python3 "${CONFIG_ARGS[@]}"
 
+echo "正在启用网络自动重连……"
+nmcli connection modify "${ACTIVE_CONNECTION}" \
+  connection.autoconnect yes \
+  connection.autoconnect-priority 100 \
+  connection.autoconnect-retries 0
+
 if [[ "${ACTIVE_TYPE}" == "wifi" ]]; then
-  echo "正在启用 Wi-Fi 自动重连……"
   nmcli connection modify "${ACTIVE_CONNECTION}" \
-    connection.autoconnect yes \
-    connection.autoconnect-priority 100 \
-    connection.autoconnect-retries 0 \
     802-11-wireless.powersave 2
   nmcli radio wifi on
 fi

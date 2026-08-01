@@ -316,7 +316,7 @@ def run_command(command: list[str], timeout: int) -> Optional[str]:
             capture_output=True,
             text=True,
             timeout=timeout,
-            env={**os.environ, "LC_ALL": "C"},
+            env={**os.environ, "LC_ALL": "C.UTF-8"},
             creationflags=creation_flags,
         )
     except (OSError, subprocess.TimeoutExpired):

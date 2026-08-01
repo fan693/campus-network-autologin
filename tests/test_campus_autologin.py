@@ -87,6 +87,16 @@ class ConfigurationTests(unittest.TestCase):
             )
 
 
+class NetworkDetectionTests(unittest.TestCase):
+    def test_linux_connection_name_uses_utf8_locale(self) -> None:
+        completed = mock.Mock(returncode=0, stdout="有线连接 1\n")
+        with mock.patch.object(app.subprocess, "run", return_value=completed) as run:
+            connection = app.linux_active_connection("eno1", 5)
+
+        self.assertEqual(connection, "有线连接 1")
+        self.assertEqual(run.call_args.kwargs["env"]["LC_ALL"], "C.UTF-8")
+
+
 class ProtocolTests(unittest.TestCase):
     def test_drcom_login_renders_expected_fields(self) -> None:
         config = make_config(

@@ -48,7 +48,7 @@ def command_output(command: list[str]) -> str:
             capture_output=True,
             text=True,
             timeout=10,
-            env={**os.environ, "LC_ALL": "C"},
+            env={**os.environ, "LC_ALL": "C.UTF-8"},
         )
     except (OSError, subprocess.TimeoutExpired):
         return ""
@@ -169,8 +169,12 @@ def build_config(args: argparse.Namespace, existing: dict[str, Any]) -> dict[str
 
     print("校园网自动重连配置向导")
     print("安全提示：按你的要求，密码输入会在屏幕上明文显示；请确认身边无人观看或录屏。")
-    network_name = ask("目标 Wi-Fi/有线连接名称", network_name)
-    interface = ask("网卡名称", interface, required=False)
+    if args.lock_network:
+        if not network_name or not interface:
+            raise SystemExit("安装器未提供有效的目标网络。")
+    else:
+        network_name = ask("目标 Wi-Fi/有线连接名称", network_name)
+        interface = ask("网卡名称", interface, required=False)
     username = ask("校园网账号", str(existing.get("username", "")))
 
     old_password = existing.get("password", "") if isinstance(existing.get("password"), str) else ""
@@ -219,6 +223,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--existing", type=Path)
     parser.add_argument("--network-name")
     parser.add_argument("--interface")
+    parser.add_argument("--lock-network", action="store_true")
     return parser.parse_args()
 
 
