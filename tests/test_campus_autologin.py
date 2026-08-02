@@ -48,6 +48,8 @@ def make_config(portal: dict[str, object]) -> app.Config:
         offline_interval=10,
         timeout=5,
         failure_threshold=2,
+        network_recovery_after=300,
+        network_recovery_cooldown=900,
         connectivity_checks=(app.ConnectivityCheck("https://example.test/check", 204),),
     )
 
@@ -74,6 +76,8 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(config.network_name, "CQU-WiFi")
         self.assertEqual(config.portal["type"], "drcom")
         self.assertIn("login.cqu.edu.cn", config.portal["login_url"])
+        self.assertEqual(config.network_recovery_after, 300)
+        self.assertEqual(config.network_recovery_cooldown, 900)
 
     def test_generic_portal_requires_success_marker(self) -> None:
         with self.assertRaisesRegex(ValueError, "success response marker"):
@@ -95,6 +99,49 @@ class NetworkDetectionTests(unittest.TestCase):
 
         self.assertEqual(connection, "有线连接 1")
         self.assertEqual(run.call_args.kwargs["env"]["LC_ALL"], "C.UTF-8")
+
+    def test_sustained_outage_obeys_delay_and_cooldown(self) -> None:
+        state = app.NetworkRecoveryState(recovery_after=300, cooldown=900)
+        self.assertFalse(state.observe_offline(1000))
+        self.assertFalse(state.observe_offline(1299))
+        self.assertTrue(state.observe_offline(1300))
+        self.assertFalse(state.observe_offline(2199))
+        self.assertTrue(state.observe_offline(2200))
+        state.observe_online()
+        self.assertFalse(state.observe_offline(3000))
+
+    def test_linux_recovery_refreshes_dns_and_cycles_selected_profile(self) -> None:
+        config = make_config(
+            {
+                "type": "drcom",
+                "login_url": "https://portal.example/login",
+            }
+        )
+        outputs = ["wifi", "Campus-WiFi", "profile-uuid", "", "", "", "activated"]
+        with (
+            mock.patch.object(app.platform, "system", return_value="Linux"),
+            mock.patch.object(app, "run_command", side_effect=outputs) as run,
+            mock.patch.object(app, "interruptible_sleep"),
+        ):
+            self.assertTrue(app.recover_linux_network(config))
+
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertIn(["resolvectl", "flush-caches"], commands)
+        self.assertIn(
+            ["nmcli", "connection", "down", "uuid", "profile-uuid"], commands
+        )
+        self.assertIn(
+            [
+                "nmcli",
+                "connection",
+                "up",
+                "uuid",
+                "profile-uuid",
+                "ifname",
+                "wlan0",
+            ],
+            commands,
+        )
 
 
 class ProtocolTests(unittest.TestCase):

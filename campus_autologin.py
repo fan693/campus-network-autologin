@@ -68,7 +68,31 @@ class Config:
     offline_interval: int
     timeout: int
     failure_threshold: int
+    network_recovery_after: int
+    network_recovery_cooldown: int
     connectivity_checks: tuple[ConnectivityCheck, ...]
+
+
+@dataclass
+class NetworkRecoveryState:
+    recovery_after: int
+    cooldown: int
+    offline_since: Optional[float] = None
+    last_attempt: Optional[float] = None
+
+    def observe_online(self) -> None:
+        self.offline_since = None
+
+    def observe_offline(self, now: float) -> bool:
+        if self.offline_since is None:
+            self.offline_since = now
+            return False
+        if now - self.offline_since < self.recovery_after:
+            return False
+        if self.last_attempt is not None and now - self.last_attempt < self.cooldown:
+            return False
+        self.last_attempt = now
+        return True
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -156,6 +180,8 @@ def old_config_to_current(data: dict[str, Any]) -> dict[str, Any]:
         "offline_interval": data.get("offline_interval", 10),
         "timeout": data.get("timeout", 5),
         "failure_threshold": data.get("failure_threshold", 2),
+        "network_recovery_after": data.get("network_recovery_after", 300),
+        "network_recovery_cooldown": data.get("network_recovery_cooldown", 900),
         "connectivity_checks": list(DEFAULT_CHECKS),
     }
 
@@ -274,6 +300,12 @@ def load_config(path: Path) -> Config:
         offline_interval=positive_int(data, "offline_interval", 10, 5, 600),
         timeout=positive_int(data, "timeout", 5, 2, 60),
         failure_threshold=positive_int(data, "failure_threshold", 2, 1, 10),
+        network_recovery_after=positive_int(
+            data, "network_recovery_after", 300, 60, 86400
+        ),
+        network_recovery_cooldown=positive_int(
+            data, "network_recovery_cooldown", 900, 60, 86400
+        ),
         connectivity_checks=tuple(checks),
     )
 
@@ -376,6 +408,68 @@ def network_matches(config: Config) -> bool:
                 return True
         return False
     return False
+
+
+def recover_linux_network(config: Config) -> bool:
+    if platform.system() != "Linux" or not config.interface:
+        return False
+
+    network_type = run_command(
+        ["nmcli", "-g", "GENERAL.TYPE", "device", "show", config.interface],
+        config.timeout,
+    )
+    if network_type not in ("ethernet", "wifi"):
+        log(f"network recovery skipped: {config.interface} is not Ethernet or Wi-Fi")
+        return False
+
+    active_connection = linux_active_connection(config.interface, config.timeout)
+    connection = active_connection if config.network_name == "*" else config.network_name
+    if not connection or connection == "--":
+        log("network recovery skipped: the selected connection could not be identified")
+        return False
+
+    if active_connection == connection:
+        connection_uuid = run_command(
+            ["nmcli", "-g", "GENERAL.CON-UUID", "device", "show", config.interface],
+            config.timeout,
+        )
+    else:
+        connection_uuid = run_command(
+            ["nmcli", "-g", "connection.uuid", "connection", "show", connection],
+            config.timeout,
+        )
+    if not connection_uuid or "\n" in connection_uuid:
+        log(f"network recovery skipped: no unique profile found for {connection}")
+        return False
+
+    log(
+        f"refreshing DNS and reconnecting {connection} on {config.interface} "
+        "after a sustained outage"
+    )
+    run_command(["resolvectl", "flush-caches"], config.timeout)
+    run_command(["resolvectl", "reset-server-features"], config.timeout)
+    run_command(
+        ["nmcli", "connection", "down", "uuid", connection_uuid],
+        max(config.timeout, 15),
+    )
+    interruptible_sleep(2)
+    result = run_command(
+        [
+            "nmcli",
+            "connection",
+            "up",
+            "uuid",
+            connection_uuid,
+            "ifname",
+            config.interface,
+        ],
+        max(config.timeout, 30),
+    )
+    if result is None:
+        log(f"network reconnect request failed for {connection}")
+        return False
+    log(f"network reconnect request completed for {connection}")
+    return True
 
 
 def linux_ipv4(interface: str) -> Optional[str]:
@@ -782,6 +876,11 @@ def run(config: Config, once: bool = False) -> int:
     consecutive_failures = 0
     login_backoff = config.offline_interval
     last_state = ""
+    network_recovery = NetworkRecoveryState(
+        config.network_recovery_after,
+        config.network_recovery_cooldown,
+    )
+    network_recovery_enabled = platform.system() == "Linux"
     log(
         f"service started; portal={config.portal['type']}, "
         f"network={config.network_name}, interface={config.interface or 'auto'}"
@@ -798,6 +897,10 @@ def run(config: Config, once: bool = False) -> int:
             consecutive_failures = 0
             if once:
                 return 2
+            if network_recovery_enabled and network_recovery.observe_offline(
+                time.monotonic()
+            ):
+                recover_linux_network(config)
             interruptible_sleep(config.offline_interval)
             continue
 
@@ -810,6 +913,10 @@ def run(config: Config, once: bool = False) -> int:
             consecutive_failures = 0
             if once:
                 return 2
+            if network_recovery_enabled and network_recovery.observe_offline(
+                time.monotonic()
+            ):
+                recover_linux_network(config)
             interruptible_sleep(config.offline_interval)
             continue
 
@@ -819,16 +926,29 @@ def run(config: Config, once: bool = False) -> int:
                 last_state = "online"
             consecutive_failures = 0
             login_backoff = config.offline_interval
+            network_recovery.observe_online()
             if once:
                 return 0
             interruptible_sleep(config.online_interval)
             continue
 
         consecutive_failures += 1
+        recovery_due = (
+            network_recovery_enabled
+            and consecutive_failures >= config.failure_threshold
+            and network_recovery.observe_offline(time.monotonic())
+        )
         if not once and consecutive_failures < config.failure_threshold:
             if last_state != "checking":
                 log("internet check failed once; confirming before login")
                 last_state = "checking"
+            interruptible_sleep(config.offline_interval)
+            continue
+
+        if not once and recovery_due:
+            recover_linux_network(config)
+            consecutive_failures = 0
+            login_backoff = config.offline_interval
             interruptible_sleep(config.offline_interval)
             continue
 

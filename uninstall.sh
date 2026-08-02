@@ -9,6 +9,7 @@ fi
 REMOTE_SERVICE_NAME="campus-remote-recovery.service"
 REMOTE_USER_FILE="/etc/campus-autologin/remote-user"
 REMOTE_SUDOERS_FILE="/etc/sudoers.d/campus-remote-recovery"
+NETWORK_POLKIT_FILE="/etc/polkit-1/rules.d/49-campus-autologin-network.rules"
 
 if [[ -f "${REMOTE_USER_FILE}" ]]; then
   REMOTE_USER="$(head -n 1 "${REMOTE_USER_FILE}")"
@@ -28,6 +29,7 @@ if [[ -f "${REMOTE_USER_FILE}" ]]; then
   fi
 fi
 rm -f "${REMOTE_SUDOERS_FILE}"
+rm -f "${NETWORK_POLKIT_FILE}"
 
 systemctl disable --now campus-autologin.service 2>/dev/null || true
 rm -f /etc/systemd/system/campus-autologin.service

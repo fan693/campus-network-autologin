@@ -13,6 +13,8 @@
   "offline_interval": 10,
   "timeout": 5,
   "failure_threshold": 2,
+  "network_recovery_after": 300,
+  "network_recovery_cooldown": 900,
   "connectivity_checks": [
     {"url": "https://www.gstatic.com/generate_204", "status": 204},
     {"url": "http://www.msftconnecttest.com/connecttest.txt", "status": 200, "body": "Microsoft Connect Test"}

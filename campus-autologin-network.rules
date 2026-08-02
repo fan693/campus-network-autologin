@@ -1,0 +1,6 @@
+polkit.addRule(function(action, subject) {
+  if (subject.user == "campus-autologin" &&
+      action.id == "org.freedesktop.NetworkManager.network-control") {
+    return polkit.Result.YES;
+  }
+});

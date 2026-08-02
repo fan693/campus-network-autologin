@@ -200,6 +200,10 @@ def build_config(args: argparse.Namespace, existing: dict[str, Any]) -> dict[str
         "offline_interval": int(existing.get("offline_interval", 10)),
         "timeout": int(existing.get("timeout", 5)),
         "failure_threshold": int(existing.get("failure_threshold", 2)),
+        "network_recovery_after": int(existing.get("network_recovery_after", 300)),
+        "network_recovery_cooldown": int(
+            existing.get("network_recovery_cooldown", 900)
+        ),
         "connectivity_checks": existing.get(
             "connectivity_checks", list(campus_autologin.DEFAULT_CHECKS)
         ),

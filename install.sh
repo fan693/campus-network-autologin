@@ -10,6 +10,7 @@ REMOTE_USER_FILE="${CONFIG_DIR}/remote-user"
 REMOTE_SERVICE_NAME="campus-remote-recovery.service"
 REMOTE_TARGET="graphical-session.target"
 REMOTE_SUDOERS_FILE="/etc/sudoers.d/campus-remote-recovery"
+NETWORK_POLKIT_FILE="/etc/polkit-1/rules.d/49-campus-autologin-network.rules"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 desktop_user() {
@@ -237,6 +238,9 @@ install -o root -g root -m 0755 "${SCRIPT_DIR}/remote_recovery.py" \
   "${PROGRAM_DIR}/remote_recovery.py"
 install -o root -g root -m 0644 "${SCRIPT_DIR}/campus-autologin.service" \
   "${SERVICE_FILE}"
+install -d -o root -g root -m 0755 "$(dirname -- "${NETWORK_POLKIT_FILE}")"
+install -o root -g root -m 0644 "${SCRIPT_DIR}/campus-autologin-network.rules" \
+  "${NETWORK_POLKIT_FILE}"
 install -o root -g "${SERVICE_USER}" -m 0640 "${TEMP_CONFIG}" "${CONFIG_FILE}"
 
 runuser -u "${SERVICE_USER}" -- /usr/bin/python3 \
