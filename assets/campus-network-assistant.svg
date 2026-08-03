@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Campus Network Assistant">
+  <defs>
+    <linearGradient id="background" x1="26" y1="18" x2="230" y2="238" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#102229"/>
+      <stop offset="1" stop-color="#071014"/>
+    </linearGradient>
+    <linearGradient id="route" x1="51" y1="91" x2="207" y2="153" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#65cfe2"/>
+      <stop offset="0.56" stop-color="#f4bd68"/>
+      <stop offset="1" stop-color="#54e39d"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="58" fill="url(#background)" stroke="#29434b" stroke-width="5"/>
+  <path d="M48 92C83 64 109 126 143 105C169 88 184 108 208 80" fill="none" stroke="#20363d" stroke-width="13" stroke-linecap="round"/>
+  <path d="M48 92C83 64 109 126 143 105C169 88 184 108 208 80" fill="none" stroke="url(#route)" stroke-width="7" stroke-linecap="round"/>
+  <g filter="url(#glow)">
+    <circle cx="48" cy="92" r="14" fill="#65cfe2" stroke="#071014" stroke-width="7"/>
+    <circle cx="143" cy="105" r="14" fill="#f4bd68" stroke="#071014" stroke-width="7"/>
+    <circle cx="208" cy="80" r="14" fill="#54e39d" stroke="#071014" stroke-width="7"/>
+  </g>
+  <path d="M128 128L190 151V181C190 213 165 232 128 240C91 232 66 213 66 181V151L128 128Z" fill="#102d26" stroke="#54e39d" stroke-width="8" stroke-linejoin="round"/>
+  <path d="M96 183L118 204L162 160" fill="none" stroke="#54e39d" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

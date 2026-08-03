@@ -147,7 +147,7 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
-for command_name in python3 nmcli systemctl install runuser sudo visudo; do
+for command_name in python3 nmcli systemctl install runuser sudo visudo pkexec; do
   if ! command -v "${command_name}" >/dev/null 2>&1; then
     echo "缺少命令：${command_name}" >&2
     exit 1
@@ -236,6 +236,8 @@ install -o root -g root -m 0755 "${SCRIPT_DIR}/configure.py" \
   "${PROGRAM_DIR}/configure.py"
 install -o root -g root -m 0755 "${SCRIPT_DIR}/remote_recovery.py" \
   "${PROGRAM_DIR}/remote_recovery.py"
+install -o root -g root -m 0755 "${SCRIPT_DIR}/campus_control.py" \
+  "${PROGRAM_DIR}/campus_control.py"
 install -o root -g root -m 0644 "${SCRIPT_DIR}/campus-autologin.service" \
   "${SERVICE_FILE}"
 install -d -o root -g root -m 0755 "$(dirname -- "${NETWORK_POLKIT_FILE}")"

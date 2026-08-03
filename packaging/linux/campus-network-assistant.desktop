@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=校园网连接助手
+Name[en]=Campus Network Assistant
+Comment=查看校园网认证、网络恢复和远程软件守护状态
+Comment[en]=Monitor campus authentication, network recovery, and remote-access health
+Exec=campus-network-assistant
+Icon=campus-network-assistant
+Terminal=false
+Categories=Network;
+Keywords=campus;network;login;recovery;校园网;自动认证;
+StartupNotify=true
+StartupWMClass=campus-network-assistant
