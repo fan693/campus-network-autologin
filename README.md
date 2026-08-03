@@ -2,7 +2,7 @@
 
 适用于 Ubuntu 和 Windows 的校园网监测、断线重连、门户自动认证与远程控制软件恢复工具。
 
-桌面托盘、状态窗口和 GitHub 更新提醒的 v5 软件设计见 [`docs/DESKTOP_APP_DESIGN.md`](docs/DESKTOP_APP_DESIGN.md)。
+桌面托盘、状态窗口和 GitHub 更新提醒的 v1.0 软件设计见 [`docs/DESKTOP_APP_DESIGN.md`](docs/DESKTOP_APP_DESIGN.md)。
 
 当前桌面预览已提供可打开的“设置”和“重新认证”窗口：总开关关闭时停止校园网自动认证与远程软件自动恢复，但保留 GUI 以便重新开启；认证窗口可以选择重庆大学预设、其他 Dr.COM/ePortal、深澜 SRUN 或通用 HTTP 门户。更换配置时，新密码只通过受保护的标准输入管道提交，不进入命令行、环境变量或日志。
 

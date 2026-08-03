@@ -29,8 +29,9 @@ except ImportError:  # Unix
 
 
 REPOSITORY = "fan693/campus-network-autologin"
-LATEST_RELEASE_API = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
+RELEASES_API = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=20"
 RELEASE_PATH_PREFIX = f"/{REPOSITORY}/releases/tag/"
+APP_TAG_PREFIX = "app-v"
 USER_AGENT_PRODUCT = "campus-network-assistant"
 AUTO_CHECK_INTERVAL = timedelta(hours=24)
 CONNECT_TIMEOUT = 5
@@ -294,7 +295,7 @@ class GitHubReleaseClient:
         }
         if etag:
             headers["If-None-Match"] = etag
-        request = urllib.request.Request(LATEST_RELEASE_API, headers=headers, method="GET")
+        request = urllib.request.Request(RELEASES_API, headers=headers, method="GET")
         try:
             with self.opener.open(request, timeout=CONNECT_TIMEOUT) as response:
                 body = response.read(MAX_RESPONSE_BYTES + 1)
@@ -315,26 +316,34 @@ class GitHubReleaseClient:
             payload = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise UpdateInvalidResponse("GitHub returned invalid JSON") from exc
-        if not isinstance(payload, dict):
-            raise UpdateInvalidResponse("GitHub response is not an object")
-        if payload.get("draft") is not False or payload.get("prerelease") is not False:
-            raise UpdateInvalidResponse("latest Release is not stable")
-        tag_name = payload.get("tag_name")
-        html_url = payload.get("html_url")
-        published_at = payload.get("published_at")
-        if not isinstance(tag_name, str) or not isinstance(html_url, str):
-            raise UpdateInvalidResponse("Release metadata is incomplete")
-        if published_at is not None and not isinstance(published_at, str):
-            raise UpdateInvalidResponse("Release publication time is invalid")
-        try:
-            version = Version.parse(tag_name, allow_v_prefix=True)
-        except ValueError as exc:
-            raise UpdateInvalidResponse("Release tag is invalid") from exc
-        if not tag_name.startswith("v") or not validate_release_page(html_url, tag_name):
-            raise UpdateInvalidResponse("Release page is outside the trusted repository")
+        if not isinstance(payload, list):
+            raise UpdateInvalidResponse("GitHub response is not a release list")
+        releases: list[ReleaseInfo] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            if item.get("draft") is not False or item.get("prerelease") is not False:
+                continue
+            tag_name = item.get("tag_name")
+            html_url = item.get("html_url")
+            published_at = item.get("published_at")
+            if not isinstance(tag_name, str) or not tag_name.startswith(APP_TAG_PREFIX):
+                continue
+            if not isinstance(html_url, str) or not validate_release_page(html_url, tag_name):
+                raise UpdateInvalidResponse("Release page is outside the trusted repository")
+            if published_at is not None and not isinstance(published_at, str):
+                raise UpdateInvalidResponse("Release publication time is invalid")
+            try:
+                version = Version.parse(tag_name[len(APP_TAG_PREFIX):])
+            except ValueError:
+                continue
+            releases.append(ReleaseInfo(version, tag_name, html_url, published_at))
+        if not releases:
+            raise UpdateInvalidResponse("no stable desktop application Release was found")
+        latest = max(releases, key=lambda release: release.version)
         return FetchResult(
             "ok",
-            ReleaseInfo(version, tag_name, html_url, published_at),
+            latest,
             response_etag,
         )
 

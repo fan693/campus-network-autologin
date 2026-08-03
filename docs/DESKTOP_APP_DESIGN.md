@@ -1,7 +1,7 @@
 # 校园网连接助手桌面软件设计
 
 状态：设计冻结，可按阶段 A-D 开发
-目标版本：v5.0.0
+目标版本：v1.0.0
 适用平台：Ubuntu 20.04/22.04/24.04、Windows 10/11
 
 ## 1. 目标
@@ -21,7 +21,7 @@
 
 ## 2. 产品边界
 
-### 2.1 v5.0 必须包含
+### 2.1 v1.0 必须包含
 
 - 系统托盘图标与主状态窗口。
 - 当前连接、互联网、校园网认证服务和远程软件恢复服务状态。
@@ -32,9 +32,9 @@
 - 升级时保留现有配置，卸载时由用户选择是否删除配置。
 - 继续支持当前已有的 ToDesk、向日葵、AnyDesk、RustDesk 和 TeamViewer 检测与恢复。
 
-v5.0 首批二进制只支持 Ubuntu `amd64` 和 Windows `x64`。其他 CPU 架构可以从源码运行，但不属于 v5.0 发布验收范围。
+v1.0 首批二进制只支持 Ubuntu `amd64` 和 Windows `x64`。其他 CPU 架构可以从源码运行，但不属于 v1.0 发布验收范围。
 
-### 2.2 v5.0 不包含
+### 2.2 v1.0 不包含
 
 - 后台静默自动升级。
 - 软件内下载并自动执行未知安装包。
@@ -97,9 +97,9 @@ GitHub Releases
 | `campus-control` | root 的最小系统服务 | 不单独常驻 | 状态读取、固定控制方法和 polkit 授权 |
 | `campusctl` | 当前用户；由控制服务决定授权 | 当前用户 | 将固定命令转换为本地 IPC，请求中不包含 shell 文本 |
 
-Ubuntu GUI 不直接读取 `/etc/campus-autologin/config.json`，也不继承后台服务权限。`campus-control` 通过 system D-Bus 暴露固定方法，并用独立 polkit action 控制每种操作。Windows v5.0 明确采用 **per-user 安装**：配置、计划任务、GUI 和更新缓存都属于安装用户，不因 UAC 管理员身份重新解析 `%APPDATA%`。只有重启需要管理员权限的第三方远程软件服务时，才启动带固定服务名的提升助手；助手同时接收安装时记录的原始用户 SID，禁止使用提升账户的用户目录。
+Ubuntu GUI 不直接读取 `/etc/campus-autologin/config.json`，也不继承后台服务权限。`campus-control` 通过 system D-Bus 暴露固定方法，并用独立 polkit action 控制每种操作。Windows v1.0 明确采用 **per-user 安装**：配置、计划任务、GUI 和更新缓存都属于安装用户，不因 UAC 管理员身份重新解析 `%APPDATA%`。只有重启需要管理员权限的第三方远程软件服务时，才启动带固定服务名的提升助手；助手同时接收安装时记录的原始用户 SID，禁止使用提升账户的用户目录。
 
-不得提供“执行任意命令”接口，不得把用户输入拼接到 shell、PowerShell 或 `systemctl` 字符串。Ubuntu 自动认证系统服务在用户注销后继续运行；Windows v5.0 只保证安装用户保持登录时运行，注销后的无人值守运行不属于本版本承诺。
+不得提供“执行任意命令”接口，不得把用户输入拼接到 shell、PowerShell 或 `systemctl` 字符串。Ubuntu 自动认证系统服务在用户注销后继续运行；Windows v1.0 只保证安装用户保持登录时运行，注销后的无人值守运行不属于本版本承诺。
 
 ## 5. 用户体验
 
@@ -128,7 +128,7 @@ Ubuntu GUI 不直接读取 `/etc/campus-autologin/config.json`，也不继承后
 
 ```text
 +--------------------------------------------------+
-| 校园网连接助手                         v5.0.0    |
+| 校园网连接助手                         v1.0.0    |
 +--------------------------------------------------+
 | 网络连接       有线连接 / eno1          已连接   |
 | 互联网         最近检测 10:32:18        正常     |
@@ -137,7 +137,7 @@ Ubuntu GUI 不直接读取 `/etc/campus-autologin/config.json`，也不继承后
 +--------------------------------------------------+
 | [立即检测] [重新认证] [查看日志] [设置]          |
 +--------------------------------------------------+
-| 新版本 v5.1.0 可用                  [查看更新]    |
+| 新版本 v1.1.0 可用                  [查看更新]    |
 +--------------------------------------------------+
 ```
 
@@ -158,7 +158,7 @@ Ubuntu GUI 不直接读取 `/etc/campus-autologin/config.json`，也不继承后
 Ubuntu 路径：`/run/campus-autologin/status.json`
 Windows 路径：`%LOCALAPPDATA%\CampusAutoLogin\status.json`
 
-以下是 v5.0 的强制 schema：
+以下是 v1.0 的强制 schema：
 
 ```json
 {
@@ -184,7 +184,7 @@ Windows 路径：`%LOCALAPPDATA%\CampusAutoLogin\status.json`
 
 | 字段 | 类型 | 合法值/约束 |
 | --- | --- | --- |
-| `schema_version` | integer | v5.0 只能写 `1` |
+| `schema_version` | integer | v1.0 只能写 `1` |
 | `instance_id` | string | 写入进程每次启动随机生成的 UUID，不落盘、不是设备 ID |
 | `sequence` | integer | 同一 instance 内每次写入都递增，最小为 `0` |
 | `updated_at` | string | RFC 3339，必须包含时区；仅供显示 |
@@ -230,7 +230,7 @@ Windows 路径：`%LOCALAPPDATA%\CampusAutoLogin\status.json`
 
 `monitor` 必填并使用 `running/stopped/not_needed/failed/unknown`。`key` 只能是 `todesk/sunlogin/anydesk/rustdesk/teamviewer`；数组只包含检测到的软件。`process` 和 `background_service` 使用 `running/stopped/unknown/not_applicable`，`connection` 使用 `online/offline/unknown`，`recovery` 使用 `idle/waiting/restarting/cooldown/failed`。未来增加客户端必须新增 key，不得改变已有 key 的含义。
 
-v5.0 沿用并必须回归验证现有探针：ToDesk Linux 检查进程、后台服务、本地控制端口、中心认证日志和当前 TCP 连接；AnyDesk 优先使用官方状态命令；向日葵、RustDesk 和 TeamViewer 检查进程与已安装后台服务，并在公网恢复后刷新。没有可靠在线探针时必须返回 `connection=unknown`，不能把“进程存在”伪装成在线。
+v1.0 沿用并必须回归验证现有探针：ToDesk Linux 检查进程、后台服务、本地控制端口、中心认证日志和当前 TCP 连接；AnyDesk 优先使用官方状态命令；向日葵、RustDesk 和 TeamViewer 检查进程与已安装后台服务，并在公网恢复后刷新。没有可靠在线探针时必须返回 `connection=unknown`，不能把“进程存在”伪装成在线。
 
 ### 6.2 写入、过期和状态合成
 
@@ -253,7 +253,7 @@ v5.0 沿用并必须回归验证现有探针：ToDesk Linux 检查进程、后�
 
 ### 6.3 稳定错误码
 
-v5.0 只允许以下错误码进入状态、IPC 和 UI：
+v1.0 只允许以下错误码进入状态、IPC 和 UI：
 
 ```text
 ok invalid_request schema_unsupported operation_conflict operation_cancelled
@@ -426,15 +426,15 @@ Ubuntu 配置事务目录固定为 `/var/lib/campus-autologin/transactions/<oper
 
 ### 8.1 版本来源
 
-仓库增加根目录 `VERSION`，内容为严格 SemVer，例如 `5.0.0`。正式发布使用 `v5.0.0` 标签，并创建非草稿、非预发布的 GitHub Release。
+仓库增加根目录 `VERSION`，内容为严格 SemVer，例如 `1.0.0`。为了与现有脚本的 `v4.x` 标签隔离，桌面应用正式发布使用 `app-v1.0.0` 标签，并创建非草稿、非预发布的 GitHub Release。
 
 更新检查请求：
 
 ```text
-GET https://api.github.com/repos/fan693/campus-network-autologin/releases/latest
+GET https://api.github.com/repos/fan693/campus-network-autologin/releases?per_page=20
 Accept: application/vnd.github+json
 If-None-Match: <上次保存的 ETag>
-User-Agent: campus-network-assistant/5.0.0
+User-Agent: campus-network-assistant/1.0.0
 ```
 
 请求不附带 GitHub token。保存的内容仅包括：
@@ -455,15 +455,15 @@ User-Agent: campus-network-assistant/5.0.0
 
 更新检查失败不影响网络服务；使用 5 秒连接超时、10 秒总超时，不在同一次任务中重试。GitHub 返回限流时，将下一次允许时间延后到 `X-RateLimit-Reset` 和 24 小时下限中的较晚者。
 
-首次安装在发送任何 GitHub 请求前展示简短隐私说明，更新检查默认勾选启用，用户可以取消。无人值守安装默认关闭，只有显式参数 `--enable-update-check` 才启用。从 v4 升级时，在用户首次打开 v5 界面前保持关闭并询问一次。
+首次安装在发送任何 GitHub 请求前展示简短隐私说明，更新检查默认勾选启用，用户可以取消。无人值守安装默认关闭，只有显式参数 `--enable-update-check` 才启用。从 v4 脚本升级时，在用户首次打开桌面应用 v1.0 前保持关闭并询问一次。
 
 ### 8.2 版本比较
 
-- 本地 `VERSION` 只接受 `MAJOR.MINOR.PATCH`；API 只读取 `tag_name`，只接受 `vMAJOR.MINOR.PATCH`。
-- 三段均为无前导零的 0-999999 整数；v5.0 不支持 prerelease 或 build metadata。
+- 本地 `VERSION` 只接受 `MAJOR.MINOR.PATCH`；API 只读取最近 20 个 Release，并只接受 `app-vMAJOR.MINOR.PATCH`。普通 `vMAJOR.MINOR.PATCH` 属于原脚本发布线，桌面应用必须忽略。
+- 三段均为无前导零的 0-999999 整数；v1.0 不支持 prerelease 或 build metadata。
 - 数字分段比较，禁止把版本当普通字符串比较；忽略 API 中 `prerelease=true` 或 `draft=true` 的 Release。
 - 本地版本格式异常时不提示升级，只记录脱敏错误。
-- `html_url` 必须经结构化 URL 解析，并严格满足：scheme 为 `https`、无 userinfo、无显式非 443 端口、host 精确为 `github.com`、path 以 `/fan693/campus-network-autologin/releases/tag/v` 开头。API 请求只允许精确的 `api.github.com/repos/fan693/campus-network-autologin/releases/latest`，禁用跨 origin 重定向。
+- `html_url` 必须经结构化 URL 解析，并严格满足：scheme 为 `https`、无 userinfo、无显式非 443 端口、host 精确为 `github.com`、path 以 `/fan693/campus-network-autologin/releases/tag/app-v` 开头。API 请求只允许精确的 `api.github.com/repos/fan693/campus-network-autologin/releases?per_page=20`，禁用跨 origin 重定向。
 
 ### 8.3 用户操作
 
@@ -475,7 +475,7 @@ User-Agent: campus-network-assistant/5.0.0
 
 “每个版本最多主动提醒一次”指没有用户交互时只弹一次；用户点击“稍后提醒”是明确授权该版本在指定时间再弹一次。手动检查始终只更新窗口，不计为主动通知。
 
-v5.0 不在后台下载或执行安装包。这样即使 Release 内容、网络响应或本地状态出现异常，也不会自动改变正在运行的远程网络环境。“查看更新”只打开经过上述白名单验证的 Release 页面。
+v1.0 不在后台下载或执行安装包。这样即使 Release 内容、网络响应或本地状态出现异常，也不会自动改变正在运行的远程网络环境。“查看更新”只打开经过上述白名单验证的 Release 页面。
 
 ## 9. 配置与秘密
 
@@ -508,7 +508,7 @@ GitHub 更新检查会向 GitHub 暴露普通网络请求必然包含的公网 I
 
 图形会话不可用时跳过托盘，但后台系统服务照常运行。QSystemTrayIcon 不可用时，应用菜单仍可打开主窗口；通知通过 `org.freedesktop.Notifications` 发送，通知服务也不可用时只在下次打开窗口时显示更新横幅，不把 `notify-send` 作为硬依赖。
 
-v5.0 Ubuntu 安装是每台机器一个校园网配置、一个安装时选定的桌面用户，不支持多个用户分别配置不同校园网账号。`apt remove` 删除程序、服务和易失状态但保留 `/etc/campus-autologin/config.json`；`apt purge` 才删除配置和保存的凭据，保证非交互包管理可预测。从 v4 升级时，安装器必须使用第 7.5 节同一个受保护配置事务完成校验、备份、迁移、启动确认、失败恢复和清理；成功启动 v5 后再删除本项目拥有的旧 `/usr/local/lib/campus-autologin` 文件，不删除未知文件。
+桌面应用 v1.0 的 Ubuntu 安装是每台机器一个校园网配置、一个安装时选定的桌面用户，不支持多个用户分别配置不同校园网账号。`apt remove` 删除程序、服务和易失状态但保留 `/etc/campus-autologin/config.json`；`apt purge` 才删除配置和保存的凭据，保证非交互包管理可预测。从 v4 脚本升级时，安装器必须使用第 7.5 节同一个受保护配置事务完成校验、备份、迁移、启动确认、失败恢复和清理；成功启动桌面应用 v1.0 后再删除本项目拥有的旧 `/usr/local/lib/campus-autologin` 文件，不删除未知文件。
 
 `.deb` 的 `postinst` 只创建无登录服务账户、安装/重载 unit、D-Bus policy 和 polkit action，不在 dpkg 中弹交互问题。存在有效旧配置时迁移并启用后台服务；新安装保持 `not_configured`，由用户从应用菜单启动首次设置，或执行 `sudo campus-network-assistant-setup --desktop-user <用户>`。设置成功后记录唯一桌面 UID，启用系统认证服务，并为该用户启用远程恢复和更新检查 user unit。系统 unit 必须使用 `RuntimeDirectory`、明确的 `User/Group`、最小地址族、只读系统目录和空 capability bounding set；只有 root 控制服务保留完成固定管理操作所需的权限。
 
@@ -610,7 +610,7 @@ tests/
 - 操作安全：每个按钮映射固定 IPC 方法，不经过 shell；D-Bus/named-pipe 拒绝错误 UID/SID、超大请求和未知方法。
 - 返回协议：所有退出码、超时、accepted/completed、并发合并和用户取消提权。
 - 首次绑定：两个不同 UID 并发认领、同 UID 重试、管理员取消、v4 用户记录无效和 root rebind 回滚。
-- 配置升级：v3/v4 配置升级到 v5 时密码不丢失、不输出；每个事务阶段崩溃后恢复；事务目录 owner/mode/ACL 正确且成功后无秘密副本残留。
+- 配置升级：v3/v4 脚本配置升级到桌面应用 v1.0 时密码不丢失、不输出；每个事务阶段崩溃后恢复；事务目录 owner/mode/ACL 正确且成功后无秘密副本残留。
 - 日志与诊断：只允许稳定错误码和脱敏结构，不含门户原文或第三方原始日志。
 - 后台回归：现有校园网和远程恢复测试全部继续通过。
 
@@ -664,7 +664,7 @@ tests/
 - 构建 `.deb`、Windows 安装包、自动启动和升级迁移。
 - 在干净系统完成真实安装与断网恢复验收。
 
-阶段 A 和 B 完成后再接 UI，避免界面先行却没有稳定状态契约。v5.0 的完成标准是两个平台均有可安装产物，并通过本节全部验收项，而不是仅能从源码启动窗口。
+阶段 A 和 B 完成后再接 UI，避免界面先行却没有稳定状态契约。v1.0 的完成标准是两个平台均有可安装产物，并通过本节全部验收项，而不是仅能从源码启动窗口。
 
 ## 16. 后续版本
 
