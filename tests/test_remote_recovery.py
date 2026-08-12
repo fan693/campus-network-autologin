@@ -97,24 +97,20 @@ class ProcessTests(unittest.TestCase):
 
     def test_generic_health_checks_declared_background_service(self) -> None:
         app = recovery.RemoteApp(recovery.APP_DEFINITIONS[2], ("/usr/bin/anydesk",))
-        with (
-            mock.patch.object(recovery, "app_running", return_value=True),
-            mock.patch.object(recovery, "app_service_state", return_value="offline"),
-        ):
-            status = recovery.app_health(app)
+        with mock.patch.object(recovery, "app_running", return_value=True):
+            with mock.patch.object(recovery, "app_service_state", return_value="offline"):
+                status = recovery.app_health(app)
         self.assertEqual(status.state, "unhealthy")
         self.assertIn("background service", status.reason)
 
     def test_todesk_health_detects_center_socket_loss(self) -> None:
         app = recovery.RemoteApp(recovery.APP_DEFINITIONS[0], ("/opt/todesk/bin/ToDesk",))
-        with (
-            mock.patch.object(recovery, "app_running", return_value=True),
-            mock.patch.object(recovery, "app_service_state", return_value="online"),
-            mock.patch.object(recovery, "local_port_open", return_value=True),
-            mock.patch.object(recovery, "todesk_center_state", return_value="offline"),
-            mock.patch.object(recovery.platform, "system", return_value="Linux"),
-        ):
-            status = recovery.app_health(app)
+        with mock.patch.object(recovery, "app_running", return_value=True):
+            with mock.patch.object(recovery, "app_service_state", return_value="online"):
+                with mock.patch.object(recovery, "local_port_open", return_value=True):
+                    with mock.patch.object(recovery, "todesk_center_state", return_value="offline"):
+                        with mock.patch.object(recovery.platform, "system", return_value="Linux"):
+                            status = recovery.app_health(app)
         self.assertEqual(status.state, "unhealthy")
         self.assertEqual(status.failure_threshold, 6)
 
@@ -132,23 +128,19 @@ class ProcessTests(unittest.TestCase):
                 returncode=0,
                 stdout=f"DISPLAY=:1\nXAUTHORITY={authority}\nXDG_RUNTIME_DIR=/run/user/1000\n",
             )
-            with (
-                mock.patch.object(recovery.platform, "system", return_value="Linux"),
-                mock.patch.object(recovery.subprocess, "run", return_value=result),
-            ):
-                environment = recovery.graphical_environment({})
+            with mock.patch.object(recovery.platform, "system", return_value="Linux"):
+                with mock.patch.object(recovery.subprocess, "run", return_value=result):
+                    environment = recovery.graphical_environment({})
         self.assertEqual(environment["DISPLAY"], ":1")
         self.assertEqual(environment["XAUTHORITY"], str(authority))
 
     def test_linux_stop_escalates_when_process_ignores_term(self) -> None:
         app = recovery.RemoteApp(recovery.APP_DEFINITIONS[0], ("/opt/todesk/bin/ToDesk",))
-        with (
-            mock.patch.object(recovery.platform, "system", return_value="Linux"),
-            mock.patch.object(recovery, "app_running", return_value=True),
-            mock.patch.object(recovery.time, "sleep"),
-            mock.patch.object(recovery.subprocess, "run") as run,
-        ):
-            recovery.stop_app(app)
+        with mock.patch.object(recovery.platform, "system", return_value="Linux"):
+            with mock.patch.object(recovery, "app_running", return_value=True):
+                with mock.patch.object(recovery.time, "sleep"):
+                    with mock.patch.object(recovery.subprocess, "run") as run:
+                        recovery.stop_app(app)
         commands = [call.args[0] for call in run.call_args_list]
         self.assertTrue(any(command[1] == "-TERM" for command in commands))
         self.assertTrue(any(command[1] == "-KILL" for command in commands))
@@ -157,14 +149,12 @@ class ProcessTests(unittest.TestCase):
 class RecoveryTests(unittest.TestCase):
     def test_linux_app_can_escalate_to_declared_service(self) -> None:
         app = recovery.RemoteApp(recovery.APP_DEFINITIONS[2], ("/usr/bin/anydesk",))
-        with (
-            mock.patch.object(recovery.platform, "system", return_value="Linux"),
-            mock.patch.object(recovery, "restart_app", return_value=True) as restart,
-            mock.patch.object(recovery, "wait_for_app_ready", side_effect=[False, True]),
-            mock.patch.object(recovery, "installed_service_name", return_value="anydesk.service"),
-            mock.patch.object(recovery, "restart_app_service", return_value=True),
-        ):
-            recovered, service_restarted = recovery.recover_app(app, "offline", True)
+        with mock.patch.object(recovery.platform, "system", return_value="Linux"):
+            with mock.patch.object(recovery, "restart_app", return_value=True) as restart:
+                with mock.patch.object(recovery, "wait_for_app_ready", side_effect=[False, True]):
+                    with mock.patch.object(recovery, "installed_service_name", return_value="anydesk.service"):
+                        with mock.patch.object(recovery, "restart_app_service", return_value=True):
+                            recovered, service_restarted = recovery.recover_app(app, "offline", True)
         self.assertTrue(recovered)
         self.assertTrue(service_restarted)
         self.assertEqual(restart.call_count, 2)

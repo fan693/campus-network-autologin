@@ -35,4 +35,10 @@ jobs:
           python-version: "3.12"
       - run: python -m unittest discover -s tests -v
       - shell: pwsh
-        run: Get-ChildItem *.ps1 | ForEach-Object { [void][scriptblock]::Create((Get-Content $_ -Raw)) }
+        run: |
+          $errors = @()
+          Get-ChildItem *.ps1 | ForEach-Object {
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$parseErrors)
+            $errors += $parseErrors
+          }
+          if ($errors.Count -gt 0) { $errors | Format-List; exit 1 }

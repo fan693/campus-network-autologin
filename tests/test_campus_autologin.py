@@ -162,14 +162,12 @@ class NetworkDetectionTests(unittest.TestCase):
             }
         )
         outputs = ["wifi", "Campus-WiFi", "profile-uuid", "", "", "", "activated"]
-        with (
-            mock.patch.object(app.platform, "system", return_value="Linux"),
-            mock.patch.object(app, "run_command", side_effect=outputs) as run,
-            mock.patch.object(app, "interruptible_sleep"),
-            mock.patch.object(app, "network_matches", return_value=True),
-            mock.patch.object(app, "get_ipv4", return_value="10.0.0.2"),
-        ):
-            self.assertTrue(app.recover_linux_network(config))
+        with mock.patch.object(app.platform, "system", return_value="Linux"):
+            with mock.patch.object(app, "run_command", side_effect=outputs) as run:
+                with mock.patch.object(app, "interruptible_sleep"):
+                    with mock.patch.object(app, "network_matches", return_value=True):
+                        with mock.patch.object(app, "get_ipv4", return_value="10.0.0.2"):
+                            self.assertTrue(app.recover_linux_network(config))
 
         commands = [call.args[0] for call in run.call_args_list]
         self.assertIn(["resolvectl", "flush-caches"], commands)
@@ -298,38 +296,32 @@ class RunLoopTests(unittest.TestCase):
 
     def test_once_does_not_login_when_network_does_not_match(self) -> None:
         config = make_config({"type": "drcom", "login_url": "https://portal.example/login"})
-        with (
-            mock.patch.object(app, "build_opener"),
-            mock.patch.object(app, "network_matches", return_value=False),
-            mock.patch.object(app, "portal_login") as login,
-        ):
-            self.assertEqual(app.run(config, once=True), 2)
+        with mock.patch.object(app, "build_opener"):
+            with mock.patch.object(app, "network_matches", return_value=False):
+                with mock.patch.object(app, "portal_login") as login:
+                    self.assertEqual(app.run(config, once=True), 2)
         login.assert_not_called()
 
     def test_once_returns_failure_when_portal_rejects_login(self) -> None:
         config = make_config({"type": "drcom", "login_url": "https://portal.example/login"})
-        with (
-            mock.patch.object(app, "build_opener"),
-            mock.patch.object(app, "network_matches", return_value=True),
-            mock.patch.object(app, "get_ipv4", return_value="10.0.0.2"),
-            mock.patch.object(app, "internet_online", return_value=False),
-            mock.patch.object(app, "get_ipv6", return_value=""),
-            mock.patch.object(app, "portal_login", return_value=False),
-        ):
-            self.assertEqual(app.run(config, once=True), 4)
+        with mock.patch.object(app, "build_opener"):
+            with mock.patch.object(app, "network_matches", return_value=True):
+                with mock.patch.object(app, "get_ipv4", return_value="10.0.0.2"):
+                    with mock.patch.object(app, "internet_online", return_value=False):
+                        with mock.patch.object(app, "get_ipv6", return_value=""):
+                            with mock.patch.object(app, "portal_login", return_value=False):
+                                self.assertEqual(app.run(config, once=True), 4)
 
     def test_stop_handler_ends_monitor_loop(self) -> None:
         config = make_config({"type": "drcom", "login_url": "https://portal.example/login"})
         def stop(_seconds: int) -> None:
             app.stop_handler(15, None)
-        with (
-            mock.patch.object(app, "build_opener"),
-            mock.patch.object(app, "network_matches", return_value=True),
-            mock.patch.object(app, "get_ipv4", return_value="10.0.0.2"),
-            mock.patch.object(app, "internet_online", return_value=True),
-            mock.patch.object(app, "interruptible_sleep", side_effect=stop),
-        ):
-            self.assertEqual(app.run(config), 0)
+        with mock.patch.object(app, "build_opener"):
+            with mock.patch.object(app, "network_matches", return_value=True):
+                with mock.patch.object(app, "get_ipv4", return_value="10.0.0.2"):
+                    with mock.patch.object(app, "internet_online", return_value=True):
+                        with mock.patch.object(app, "interruptible_sleep", side_effect=stop):
+                            self.assertEqual(app.run(config), 0)
 
 
 if __name__ == "__main__":
