@@ -47,6 +47,7 @@ REMOTE_CHECKS = tuple(
 
 class ConnectivityConfig:
     connectivity_checks = REMOTE_CHECKS
+    connectivity_policy = "any"
     timeout = 6
 
 
@@ -208,7 +209,13 @@ def log(message: str) -> None:
         return
     try:
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        if LOG_FILE.exists() and LOG_FILE.stat().st_size >= 1_048_576:
+        if LOG_FILE.exists() and LOG_FILE.stat().st_size >= 2 * 1024 * 1024:
+            for index in (2, 1):
+                source = LOG_FILE.with_suffix(LOG_FILE.suffix + f".{index}")
+                target = LOG_FILE.with_suffix(LOG_FILE.suffix + f".{index + 1}")
+                if source.exists():
+                    target.unlink(missing_ok=True)
+                    source.replace(target)
             backup = LOG_FILE.with_suffix(LOG_FILE.suffix + ".1")
             backup.unlink(missing_ok=True)
             LOG_FILE.replace(backup)

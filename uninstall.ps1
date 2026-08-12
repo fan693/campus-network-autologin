@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param()
+param([switch]$Purge)
 
 $ErrorActionPreference = "Stop"
 $TaskName = "CampusNetworkAutoLogin"
@@ -12,7 +12,11 @@ Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Silent
 Stop-ScheduledTask -TaskName $RemoteTaskName -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName $RemoteTaskName -Confirm:$false -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $ConfigDir -Recurse -Force -ErrorAction SilentlyContinue
-
-Write-Host "Removed the Windows tasks, program, account configuration, and logs."
+if ($Purge) {
+    Remove-Item -LiteralPath $ConfigDir -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "Removed the Windows tasks, program, account configuration, and logs."
+} else {
+    Write-Host "Preserved configuration and logs at $ConfigDir. Use -Purge to remove them."
+    Write-Host "Removed the Windows tasks and program."
+}
 Write-Host "Existing Windows Wi-Fi profiles were not removed."

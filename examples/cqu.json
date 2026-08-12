@@ -13,6 +13,7 @@
   "offline_interval": 10,
   "timeout": 5,
   "failure_threshold": 2,
+  "connectivity_policy": "any",
   "network_recovery_after": 300,
   "network_recovery_cooldown": 900,
   "connectivity_checks": [

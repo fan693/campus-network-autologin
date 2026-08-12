@@ -235,3 +235,17 @@ python3 -m unittest discover -s tests -v
 python3 -m py_compile campus_autologin.py configure.py remote_recovery.py
 bash -n install.sh configure.sh uninstall.sh
 ```
+
+### 诊断与连通性策略
+
+可以只读查看本机脱敏状态，不会发起认证请求：
+
+```bash
+python3 campus_autologin.py --config /etc/campus-autologin/config.json --diagnose
+```
+
+`connectivity_policy` 默认是 `any`，任意一个连通性检查成功即视为在线；需要更严格判断时可设置为 `all`，或设置为 `quorum` 要求多数检查成功。
+
+Linux 卸载默认保留 `/etc/campus-autologin` 中的配置和日志，确认不再需要时再执行 `sudo bash uninstall.sh --purge`。Windows 对应使用 `uninstall.ps1 -Purge`。
+
+`desktop-app-preview` 是桌面托盘应用的实验性预览分支，主线仍以跨平台命令行、服务和计划任务为稳定维护目标；桌面应用功能暂不视为 v4 主线 API。
