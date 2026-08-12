@@ -46,9 +46,11 @@ class ConfigureWizardTests(unittest.TestCase):
             lock_network=True,
         )
         answers = ["student", "visible-password", ""]
+        output = io.StringIO()
         with mock.patch.object(configure, "detect_network", return_value=("", "")):
             with mock.patch("builtins.input", side_effect=answers):
-                config = configure.build_config(args, {})
+                with mock.patch("sys.stdout", output):
+                    config = configure.build_config(args, {})
 
         self.assertEqual(config["network_name"], "校园有线")
         self.assertEqual(config["interface"], "eno1")
