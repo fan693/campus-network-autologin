@@ -36,14 +36,14 @@ class DetectionTests(unittest.TestCase):
             desktop = root / "todesk.desktop"
             desktop.write_text(
                 "[Desktop Entry]\nName=ToDesk\n"
-                f"Exec=env GDK_BACKEND=x11 {executable} --connect=%U\n",
+                f"Exec=env GDK_BACKEND=x11 {executable.as_posix()} --connect=%U\n",
                 encoding="utf-8",
             )
             definition = replace(recovery.APP_DEFINITIONS[0], linux_paths=())
             with mock.patch.object(recovery, "APP_DEFINITIONS", (definition,)):
                 apps = recovery.detect_linux_apps([root])
         self.assertEqual([app.key for app in apps], ["todesk"])
-        self.assertEqual(apps[0].command, (str(executable),))
+        self.assertEqual(Path(apps[0].command[0]), executable)
 
     def test_windows_detects_sunlogin_from_registry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
