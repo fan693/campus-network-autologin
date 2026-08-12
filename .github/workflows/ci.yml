@@ -38,7 +38,9 @@ jobs:
         run: |
           $errors = @()
           Get-ChildItem *.ps1 | ForEach-Object {
-            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$parseErrors)
+            $tokens = $null
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$parseErrors)
             $errors += $parseErrors
           }
           if ($errors.Count -gt 0) { $errors | Format-List; exit 1 }
