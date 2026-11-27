@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import ExitStack
 import tempfile
 import unittest
 from dataclasses import replace
@@ -95,6 +96,26 @@ class ProcessTests(unittest.TestCase):
                 "offline",
             )
 
+    def test_todesk_socket_probe_failure_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "service-test.log").write_text(
+                "client create connect to comet ip=192.0.2.8 port=443\n"
+                "CCenterClientr doAuth connect AuthOk\n", encoding="utf-8",
+            )
+            with mock.patch.object(recovery.subprocess, "run", side_effect=FileNotFoundError):
+                self.assertEqual(recovery.todesk_center_state(root), "unknown")
+            self.assertEqual(recovery.todesk_center_state(root, peers=set()), "offline")
+
+    def test_rotated_todesk_log_does_not_suppress_recovery(self) -> None:
+        app = recovery.RemoteApp(recovery.APP_DEFINITIONS[0], ("/usr/bin/todesk",))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "service-new.log"
+            path.write_text("service log opened\n", encoding="utf-8")
+            with mock.patch.object(recovery.platform, "system", return_value="Linux"):
+                with mock.patch.object(recovery, "latest_todesk_service_log", return_value=path):
+                    self.assertFalse(recovery.has_deep_health_probe(app))
+
     def test_generic_health_checks_declared_background_service(self) -> None:
         app = recovery.RemoteApp(recovery.APP_DEFINITIONS[2], ("/usr/bin/anydesk",))
         with mock.patch.object(recovery, "app_running", return_value=True):
@@ -147,6 +168,37 @@ class ProcessTests(unittest.TestCase):
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_recovery_refreshes_at_boot_and_remembers_a_second_outage(self) -> None:
+        app = recovery.RemoteApp(recovery.APP_DEFINITIONS[1], ("sunlogin",))
+        observations = iter([(5, False), (20, True), (30, False), (40, True), (201, True)])
+        now = 0
+        restarts = []
+
+        def probe(*_args):
+            nonlocal now
+            now, online = next(observations)
+            return online
+
+        def sleep(_interval):
+            if now == 201:
+                recovery.RUNNING = False
+
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(recovery, "RUNNING", True))
+            for name, value in [
+                ("acquire_lock", object()), ("build_opener", None), ("running_process_names", set()),
+                ("has_deep_health_probe", False),
+                ("app_health", recovery.HealthStatus("healthy", "running", 1)),
+            ]:
+                stack.enter_context(mock.patch.object(recovery, name, return_value=value))
+            stack.enter_context(mock.patch.object(recovery.time, "monotonic", side_effect=lambda: now))
+            stack.enter_context(mock.patch.object(recovery, "internet_online", side_effect=probe))
+            stack.enter_context(mock.patch.object(recovery, "interruptible_sleep", side_effect=sleep))
+            stack.enter_context(mock.patch.object(recovery, "restart_app",
+                                                 side_effect=lambda *_args: restarts.append(now)))
+            self.assertEqual(recovery.monitor([app], 15, 10, 1, 1, 180, 900), 0)
+        self.assertEqual(restarts, [20, 201])
+
     def test_linux_app_can_escalate_to_declared_service(self) -> None:
         app = recovery.RemoteApp(recovery.APP_DEFINITIONS[2], ("/usr/bin/anydesk",))
         with mock.patch.object(recovery.platform, "system", return_value="Linux"):

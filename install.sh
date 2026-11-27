@@ -11,6 +11,7 @@ REMOTE_SERVICE_NAME="campus-remote-recovery.service"
 REMOTE_TARGET="graphical-session.target"
 REMOTE_SUDOERS_FILE="/etc/sudoers.d/campus-remote-recovery"
 NETWORK_POLKIT_FILE="/etc/polkit-1/rules.d/49-campus-autologin-network.rules"
+NETWORK_PKLA_FILE="/etc/polkit-1/localauthority/50-local.d/49-campus-autologin-network.pkla"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 desktop_user() {
@@ -39,15 +40,17 @@ remove_remote_service() {
   local user_name="$1" user_id user_home unit_dir
   getent passwd "${user_name}" >/dev/null || return 0
   user_id="$(id -u "${user_name}")"
+  [[ "${user_id}" != "0" ]] || return 0
   user_home="$(getent passwd "${user_name}" | cut -d: -f6)"
   unit_dir="${user_home}/.config/systemd/user"
   if [[ -S "/run/user/${user_id}/bus" ]]; then
     user_systemctl "${user_name}" "${user_id}" "${user_home}" \
       disable --now "${REMOTE_SERVICE_NAME}" 2>/dev/null || true
   fi
-  rm -f "${unit_dir}/${REMOTE_SERVICE_NAME}"
-  rm -f "${unit_dir}/default.target.wants/${REMOTE_SERVICE_NAME}"
-  rm -f "${unit_dir}/${REMOTE_TARGET}.wants/${REMOTE_SERVICE_NAME}"
+  runuser -u "${user_name}" -- rm -f -- \
+    "${unit_dir}/${REMOTE_SERVICE_NAME}" \
+    "${unit_dir}/default.target.wants/${REMOTE_SERVICE_NAME}" \
+    "${unit_dir}/${REMOTE_TARGET}.wants/${REMOTE_SERVICE_NAME}"
 }
 
 install_remote_privileges() {
@@ -86,7 +89,7 @@ install_remote_privileges() {
   done
   chmod 0440 "${temp_rule}"
   if ! visudo -cf "${temp_rule}" >/dev/null; then
-    rm -f "${temp_rule}"
+    rm -f "${temp_rule}" "${REMOTE_SUDOERS_FILE}"
     echo "远程软件受限重启权限校验失败；将仅启用桌面客户端恢复。" >&2
     return 0
   fi
@@ -95,9 +98,9 @@ install_remote_privileges() {
 }
 
 install_remote_recovery() {
-  local user_name="$1" user_id user_group user_home unit_dir detection
+  local user_name="$1" user_id user_home unit_dir detection
   user_id="$(id -u "${user_name}")"
-  user_group="$(id -gn "${user_name}")"
+  [[ "${user_id}" != "0" ]] || return 0
   user_home="$(getent passwd "${user_name}" | cut -d: -f6)"
   unit_dir="${user_home}/.config/systemd/user"
 
@@ -119,15 +122,13 @@ install_remote_recovery() {
 
   install_remote_privileges "${user_name}" "${detection}"
 
-  install -d -o "${user_name}" -g "${user_group}" -m 0755 "${unit_dir}"
-  install -d -o "${user_name}" -g "${user_group}" -m 0755 \
-    "${unit_dir}/${REMOTE_TARGET}.wants"
-  install -o "${user_name}" -g "${user_group}" -m 0644 \
-    "${SCRIPT_DIR}/${REMOTE_SERVICE_NAME}" "${unit_dir}/${REMOTE_SERVICE_NAME}"
-  rm -f "${unit_dir}/default.target.wants/${REMOTE_SERVICE_NAME}"
-  ln -sfn "../${REMOTE_SERVICE_NAME}" \
-    "${unit_dir}/${REMOTE_TARGET}.wants/${REMOTE_SERVICE_NAME}"
-  chown -h "${user_name}:${user_group}" \
+  # All writes below the desktop home run with that user's own permissions.
+  local -a as_user=(runuser -u "${user_name}" --)
+  "${as_user[@]}" mkdir -p -- "${unit_dir}/${REMOTE_TARGET}.wants"
+  "${as_user[@]}" install -m 0644 -- \
+    "${PROGRAM_DIR}/${REMOTE_SERVICE_NAME}" "${unit_dir}/${REMOTE_SERVICE_NAME}"
+  "${as_user[@]}" rm -f -- "${unit_dir}/default.target.wants/${REMOTE_SERVICE_NAME}"
+  "${as_user[@]}" ln -sfnT -- "../${REMOTE_SERVICE_NAME}" \
     "${unit_dir}/${REMOTE_TARGET}.wants/${REMOTE_SERVICE_NAME}"
   printf '%s\n' "${user_name}" > "${REMOTE_USER_FILE}"
   chmod 0644 "${REMOTE_USER_FILE}"
@@ -142,12 +143,42 @@ install_remote_recovery() {
   fi
 }
 
+install_network_policy() {
+  local attempt
+  # Ubuntu 20.04/22.04 use the local authority backend (polkit 0.105).
+  # Newer polkit versions read JavaScript rules.
+  if [[ "$(LC_ALL=C pkaction --version)" == *" 0.105" ]]; then
+    install -D -o root -g root -m 0644 "${SCRIPT_DIR}/campus-autologin-network.pkla" \
+      "${NETWORK_PKLA_FILE}"
+    rm -f "${NETWORK_POLKIT_FILE}"
+  else
+    install -D -o root -g root -m 0644 "${SCRIPT_DIR}/campus-autologin-network.rules" \
+      "${NETWORK_POLKIT_FILE}"
+    rm -f "${NETWORK_PKLA_FILE}"
+  fi
+
+  # Check the effective permission as the service identity after polkit reloads.
+  for attempt in {1..10}; do
+    if runuser -u "${SERVICE_USER}" -- env LC_ALL=C nmcli -t -f PERMISSION,VALUE \
+        general permissions | grep -Fx 'org.freedesktop.NetworkManager.network-control:yes' >/dev/null; then
+      break
+    fi
+    if (( attempt == 10 )); then
+      echo "服务账户缺少 NetworkManager 网络控制权限，请检查 polkit 配置。" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then return 0; fi
+
 if [[ "${EUID}" -ne 0 ]]; then
   echo "请使用 sudo bash install.sh 运行。" >&2
   exit 1
 fi
 
-for command_name in python3 nmcli systemctl install runuser sudo visudo; do
+for command_name in python3 nmcli systemctl install runuser sudo visudo pkaction; do
   if ! command -v "${command_name}" >/dev/null 2>&1; then
     echo "缺少命令：${command_name}" >&2
     exit 1
@@ -225,6 +256,8 @@ if ! getent passwd "${SERVICE_USER}" >/dev/null; then
   useradd --system --home-dir /nonexistent --shell "${NOLOGIN_SHELL}" "${SERVICE_USER}"
 fi
 
+install_network_policy
+
 systemctl disable --now cqu-autologin.service 2>/dev/null || true
 systemctl stop campus-autologin.service 2>/dev/null || true
 
@@ -236,11 +269,10 @@ install -o root -g root -m 0755 "${SCRIPT_DIR}/configure.py" \
   "${PROGRAM_DIR}/configure.py"
 install -o root -g root -m 0755 "${SCRIPT_DIR}/remote_recovery.py" \
   "${PROGRAM_DIR}/remote_recovery.py"
+install -o root -g root -m 0644 "${SCRIPT_DIR}/${REMOTE_SERVICE_NAME}" \
+  "${PROGRAM_DIR}/${REMOTE_SERVICE_NAME}"
 install -o root -g root -m 0644 "${SCRIPT_DIR}/campus-autologin.service" \
   "${SERVICE_FILE}"
-install -d -o root -g root -m 0755 "$(dirname -- "${NETWORK_POLKIT_FILE}")"
-install -o root -g root -m 0644 "${SCRIPT_DIR}/campus-autologin-network.rules" \
-  "${NETWORK_POLKIT_FILE}"
 install -o root -g "${SERVICE_USER}" -m 0640 "${TEMP_CONFIG}" "${CONFIG_FILE}"
 
 runuser -u "${SERVICE_USER}" -- /usr/bin/python3 \

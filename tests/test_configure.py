@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import io
+import json
+import os
+import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import configure
@@ -22,6 +26,45 @@ class ConfigureWizardTests(unittest.TestCase):
 
         self.assertEqual((connection, interface), ("有线连接 1", "eno1"))
         self.assertEqual(run.call_args.kwargs["env"]["LC_ALL"], "C.UTF-8")
+
+    def test_reconfiguration_keeps_custom_portal_options(self) -> None:
+        portals = [
+            {"type": "drcom", "login_url": "https://example.edu/login",
+             "account_prefix": "isp-a", "parameters": {"ac_name": "campus"}},
+            {"type": "srun", "base_url": "https://example.edu",
+             "challenge_url": "https://example.edu/alternate"},
+            {"type": "drcom", "login_url": "https://login.cqu.edu.cn:802/eportal/portal/login",
+             "account_prefix": "", "mac": "custom"},
+        ]
+        for portal in portals:
+            with self.subTest(kind=portal["type"], url=portal.get("login_url")):
+                with mock.patch("builtins.input", return_value=""), mock.patch("builtins.print"):
+                    updated = configure.choose_portal({"portal": portal})
+                for key, value in portal.items():
+                    self.assertEqual(updated[key], value)
+
+    def test_write_failure_leaves_original_intact_and_no_staged_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "config.json")
+            path.write_text("original")
+            with self.assertRaises(TypeError):
+                configure.write_config(path, {"unsupported": object()})
+            self.assertEqual(path.read_text(), "original")
+            self.assertEqual(list(path.parent.iterdir()), [path])
+
+    @unittest.skipIf(os.name == "nt", "POSIX file modes")
+    def test_private_before_serialization(self) -> None:
+        dump = json.dump
+
+        def inspect_mode(data, handle, **kwargs):
+            self.assertEqual(os.fstat(handle.fileno()).st_mode & 0o777, 0o600)
+            return dump(data, handle, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "config.json")
+            with mock.patch.object(configure.json, "dump", side_effect=inspect_mode):
+                configure.write_config(path, {"password": "fixture"})
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_password_is_echoed_for_confirmation(self) -> None:
         args = types.SimpleNamespace(
