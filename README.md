@@ -6,6 +6,14 @@
 
 当前桌面预览已提供可打开的“设置”和“重新认证”窗口：总开关关闭时停止校园网自动认证与远程软件自动恢复，但保留 GUI 以便重新开启；认证窗口可以选择重庆大学预设、其他 Dr.COM/ePortal、深澜 SRUN 或通用 HTTP 门户。更换配置时，新密码只通过受保护的标准输入管道提交，不进入命令行、环境变量或日志。
 
+## 使用桌面预览
+
+Ubuntu 先运行 `sudo apt install python3-pyqt5`，然后按下方步骤运行 `sudo bash install.sh`。在应用菜单打开“校园网连接助手”，或运行 `campus-network-assistant`。Windows 可先用 `py -3 -m pip install PyQt5` 安装图形依赖，再运行下方的 `install.ps1`，从当前用户的开始菜单打开 **Campus Network Assistant**。同一个 Python 环境已有 PySide6 时也可直接安装。
+
+开发时可以在本分支仓库根目录运行 `python3 -m campus_desktop.app`（Windows 用 `py -3 -m campus_desktop.app`）。启停自动化和修改账号需要先用对应平台的安装脚本配置后台。先关闭运行中的预览窗口，再升级或卸载。
+
+“检查更新”只查看桌面应用的正式发布。使用 `python3 -m campus_desktop.app --enable-update-check` 同意自动检查后，桌面窗口或托盘运行期间每天最多检查一次。可用 `--disable-update-check` 关闭。GitHub 的 `v4.x` 下载包属于命令行版；试用本预览请下载此分支源码。
+
 ## 为什么有这个脚本
 
 校园网经常会出现两种“看起来都像断网”的情况：

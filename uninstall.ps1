@@ -11,6 +11,7 @@ Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 Stop-ScheduledTask -TaskName $RemoteTaskName -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName $RemoteTaskName -Confirm:$false -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath("Programs")) "Campus Network Assistant.lnk") -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
 if ($Purge) {
     Remove-Item -LiteralPath $ConfigDir -Recurse -Force -ErrorAction SilentlyContinue

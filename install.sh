@@ -154,6 +154,12 @@ for command_name in python3 nmcli systemctl install runuser sudo visudo pkexec; 
   fi
 done
 
+if ! /usr/bin/python3 -c 'import PySide6.QtWidgets' 2>/dev/null &&
+   ! /usr/bin/python3 -c 'import PyQt5.QtWidgets' 2>/dev/null; then
+  echo "桌面预览需要 Qt。请先安装 sudo apt install python3-pyqt5，再重新运行本脚本。" >&2
+  exit 1
+fi
+
 SELECTION_FILE="$(mktemp)"
 trap 'rm -f "${SELECTION_FILE}"' EXIT
 chmod 0600 "${SELECTION_FILE}"
@@ -238,6 +244,15 @@ install -o root -g root -m 0755 "${SCRIPT_DIR}/remote_recovery.py" \
   "${PROGRAM_DIR}/remote_recovery.py"
 install -o root -g root -m 0755 "${SCRIPT_DIR}/campus_control.py" \
   "${PROGRAM_DIR}/campus_control.py"
+install -d -m 0755 "${PROGRAM_DIR}/campus_desktop" "${PROGRAM_DIR}/assets" \
+  /usr/local/bin /usr/local/share/applications /usr/local/share/icons/hicolor/scalable/apps
+install -m 0644 "${SCRIPT_DIR}"/campus_desktop/*.py "${PROGRAM_DIR}/campus_desktop/"
+install -m 0644 "${SCRIPT_DIR}/VERSION" "${PROGRAM_DIR}/VERSION"
+install -m 0644 "${SCRIPT_DIR}/assets/campus-network-assistant.svg" "${PROGRAM_DIR}/assets/"
+install -m 0755 "${SCRIPT_DIR}/desktop_launcher.py" "${PROGRAM_DIR}/desktop_launcher.py"
+ln -sfn "${PROGRAM_DIR}/desktop_launcher.py" /usr/local/bin/campus-network-assistant
+install -m 0644 "${SCRIPT_DIR}/packaging/linux/campus-network-assistant.desktop" /usr/local/share/applications/
+install -m 0644 "${SCRIPT_DIR}/assets/campus-network-assistant.svg" /usr/local/share/icons/hicolor/scalable/apps/
 install -o root -g root -m 0644 "${SCRIPT_DIR}/campus-autologin.service" \
   "${SERVICE_FILE}"
 install -d -o root -g root -m 0755 "$(dirname -- "${NETWORK_POLKIT_FILE}")"

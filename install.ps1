@@ -40,11 +40,30 @@ function Protect-ConfigFile([string]$Path) {
 }
 
 $pythonCommand = Get-PythonCommand
+$qtCheck = @($pythonCommand.Prefix) + @("-c", "from campus_desktop.gui import QApplication")
+Push-Location $PSScriptRoot
+try {
+    & $pythonCommand.Executable @qtCheck
+    if ($LASTEXITCODE -ne 0) {
+        throw "Install Qt in the selected Python first, for example: py -3 -m pip install PyQt5"
+    }
+} finally {
+    Pop-Location
+}
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "campus_autologin.py") -Destination $InstallDir -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "configure.py") -Destination $InstallDir -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "remote_recovery.py") -Destination $InstallDir -Force
+
+foreach ($name in @("VERSION", "campus_control.py", "desktop_launcher.py")) {
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $InstallDir -Force
+}
+foreach ($name in @("campus_desktop", "assets")) {
+    $destination = New-Item -ItemType Directory -Path (Join-Path $InstallDir $name) -Force
+    Get-ChildItem -File -LiteralPath (Join-Path $PSScriptRoot $name) |
+        Copy-Item -Destination $destination.FullName -Force
+}
 
 $configureScript = Join-Path $InstallDir "configure.py"
 $configureArgs = @($pythonCommand.Prefix) + @($configureScript, "--output", $ConfigFile)
@@ -141,6 +160,13 @@ if ($remoteDetectionExitCode -eq 0) {
 }
 
 Write-Host ""
+$startMenu = [Environment]::GetFolderPath("Programs")
+$shortcutPath = Join-Path $startMenu "Campus Network Assistant.lnk"
+$shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutPath)
+$shortcut.TargetPath = $pythonCommand.BackgroundExecutable
+$shortcut.Arguments = (@($pythonCommand.Prefix) + @('"' + (Join-Path $InstallDir "desktop_launcher.py") + '"')) -join " "
+$shortcut.WorkingDirectory = $InstallDir
+$shortcut.Save()
 Write-Host "Installation completed for Windows 10 / 11. The task starts at user logon."
 Write-Host "Configuration: $ConfigFile"
 Write-Host "Log: $LogFile"

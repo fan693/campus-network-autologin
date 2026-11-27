@@ -1048,6 +1048,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--check-config", action="store_true")
     parser.add_argument("--once", action="store_true", help="check once and log in immediately if offline")
     parser.add_argument("--log-file", type=Path)
+    parser.add_argument("--desktop-status", action="store_true", help="publish Linux tray status")
     parser.add_argument("--diagnose", action="store_true", help="print local diagnostics and exit")
     return parser.parse_args()
 
@@ -1068,6 +1069,9 @@ def main() -> int:
         return diagnose(config)
     signal.signal(signal.SIGTERM, stop_handler)
     signal.signal(signal.SIGINT, stop_handler)
+    if args.desktop_status and platform.system() == "Linux" and not args.once:
+        from campus_desktop.status import DesktopStatusWriter
+        return run(config, report_status=DesktopStatusWriter(config))
     return run(config, once=args.once)
 
 

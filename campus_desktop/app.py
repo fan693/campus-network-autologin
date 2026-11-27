@@ -57,6 +57,8 @@ def main() -> int:
             print(json.dumps(result.to_dict(), ensure_ascii=False, sort_keys=True))
         elif result.status == "update_available":
             print(f"Update available: {result.latest_version} ({result.release_page})")
+        elif result.status == "no_desktop_release":
+            print("No stable desktop release is listed yet")
         elif result.status.startswith("skipped"):
             print(f"Update check skipped: {result.status}")
         elif result.status == "error":

@@ -459,7 +459,7 @@ User-Agent: campus-network-assistant/1.0.0
 
 ### 8.2 版本比较
 
-- 本地 `VERSION` 只接受 `MAJOR.MINOR.PATCH`；API 只读取最近 20 个 Release，并只接受 `app-vMAJOR.MINOR.PATCH`。普通 `vMAJOR.MINOR.PATCH` 属于原脚本发布线，桌面应用必须忽略。
+- 本地 `VERSION` 接受 `MAJOR.MINOR.PATCH`；源码预览使用 `MAJOR.MINOR.PATCH-preview.N`，可升级到同编号正式版；API 只读取最近 20 个 Release，并只接受 `app-vMAJOR.MINOR.PATCH`。普通 `vMAJOR.MINOR.PATCH` 属于原脚本发布线，桌面应用必须忽略。
 - 三段均为无前导零的 0-999999 整数；v1.0 不支持 prerelease 或 build metadata。
 - 数字分段比较，禁止把版本当普通字符串比较；忽略 API 中 `prerelease=true` 或 `draft=true` 的 Release。
 - 本地版本格式异常时不提示升级，只记录脱敏错误。

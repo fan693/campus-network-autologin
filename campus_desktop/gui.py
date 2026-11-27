@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
+import platform
+import socket
 import re
 import subprocess
 import sys
@@ -61,7 +64,8 @@ except ImportError:
     QT_BINDING = "PyQt5"
 
 from . import control as desktop_control
-from .updater import CheckResult, UpdateChecker, Version
+from .updater import CheckResult, UpdateBusy, UpdateChecker, UpdateStore, Version, default_state_dir
+import campus_control
 
 try:
     import remote_recovery as remote_health
@@ -104,24 +108,41 @@ def run_command(command: list[str], timeout: int = 4) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
-def active_service(candidates: tuple[str, ...], *, user: bool = False) -> tuple[str, str]:
-    prefix = ["systemctl", "--user"] if user else ["systemctl"]
-    first_known = ""
-    for name in candidates:
-        load_state = run_command(prefix + ["show", name, "-p", "LoadState", "--value"])
-        if load_state != "loaded":
-            continue
-        first_known = first_known or name
-        state = run_command(prefix + ["is-active", name])
-        if state == "active":
-            return name, "active"
-    return (first_known, "inactive") if first_known else ("", "missing")
+def active_service(candidates: tuple[str, ...], *, user: bool = False) -> tuple[str, str, Optional[bool]]:
+    prefix = ["/usr/bin/systemctl", "--user"] if user else ["/usr/bin/systemctl"]
+    try:
+        state = campus_control.preferred_unit(candidates, prefix)
+    except (OSError, subprocess.SubprocessError, campus_control.ControlError):
+        return "", "unknown", None
+    if state is None:
+        return "", "missing", None
+    return state["name"], "active" if state["running"] else "inactive", state["enabled"]
 
 
-def default_interface() -> str:
-    route = run_command(["ip", "-4", "route", "get", "1.1.1.1"])
-    match = re.search(r"(?:^|\s)dev\s+(\S+)", route)
-    return match.group(1) if match else ""
+def linux_target_status(status: "DesktopStatus", snapshot: Path = Path("/run/campus-autologin/desktop-status.json")) -> None:
+    try:
+        raw = json.loads(snapshot.read_text(encoding="utf-8"))
+        now = time.time()
+        if not isinstance(raw, dict) or raw.get("schema_version") != 1:
+            return
+        updated, expiry = raw.get("updated_at"), raw.get("expires_at")
+        if not (type(updated) in (int, float) and type(expiry) in (int, float)
+                and updated <= now <= expiry and expiry - updated <= 86_400):
+            return
+        network = raw.get("network_state")
+        internet = raw.get("internet_state")
+        if network not in ("connected", "other", "unknown", "offline") or internet not in ("online", "offline", "unknown"):
+            return
+        status.network_state = network
+        status.internet_state = internet if network == "connected" else "unknown"
+        index = raw.get("interface_index")
+        if type(index) is int and index > 0:
+            interface = socket.if_indextoname(index)
+            status.interface = interface
+            status.connection_name = run_command(["nmcli", "-e", "no", "-g", "GENERAL.CONNECTION", "device", "show", interface]) or "待确认"
+            status.connection_type = run_command(["nmcli", "-g", "GENERAL.TYPE", "device", "show", interface]) or "unknown"
+    except (OSError, ValueError, OverflowError):
+        return
 
 
 REMOTE_REASON_LABELS = {
@@ -160,9 +181,11 @@ class DesktopStatus:
     connection_type: str = "unknown"
     network_state: str = "unknown"
     internet_state: str = "unknown"
-    campus_service: str = "missing"
+    campus_service: str = "unknown"
+    campus_enabled: Optional[bool] = None
     campus_service_name: str = ""
-    remote_service: str = "missing"
+    remote_service: str = "unknown"
+    remote_enabled: Optional[bool] = None
     remote_service_name: str = ""
     remote_client: str = "未检测到"
     remote_state: str = "unknown"
@@ -173,12 +196,21 @@ class DesktopStatus:
 
     @property
     def overall(self) -> str:
-        if self.campus_service == "active" and self.network_state == "connected":
-            if self.internet_state in ("online", "unknown"):
-                return "online"
-        if self.network_state == "connected":
-            return "attention"
-        return "offline"
+        if self.network_state == "connected" and self.internet_state == "online" and self.campus_service == "active":
+            return "online"
+        if self.network_state == "offline":
+            return "offline"
+        return "attention"
+
+    def master_state(self) -> Optional[bool]:
+        units = [(self.campus_service, self.campus_enabled)]
+        if self.remote_service != "missing":
+            units.append((self.remote_service, self.remote_enabled))
+        if all(state == "active" and enabled is True for state, enabled in units):
+            return True
+        if all(state == "inactive" and enabled is False for state, enabled in units):
+            return False
+        return None
 
 
 class StatusWorker(QThread):
@@ -186,40 +218,18 @@ class StatusWorker(QThread):
 
     def run(self) -> None:
         status = DesktopStatus(checked_at=time.strftime("%H:%M:%S"))
-        interface = default_interface()
-        if interface:
-            status.interface = interface
-            status.connection_name = run_command(
-                ["nmcli", "-g", "GENERAL.CONNECTION", "device", "show", interface]
-            ) or "未命名连接"
-            status.connection_type = run_command(
-                ["nmcli", "-g", "GENERAL.TYPE", "device", "show", interface]
-            ) or "unknown"
-            device_state = run_command(
-                ["nmcli", "-g", "GENERAL.STATE", "device", "show", interface]
-            )
-            status.network_state = "connected" if device_state.startswith("100") else "unknown"
-
-        connectivity = run_command(["nmcli", "networking", "connectivity"])
-        status.internet_state = {
-            "full": "online",
-            "limited": "limited",
-            "portal": "portal",
-            "none": "offline",
-        }.get(connectivity, "unknown")
-
-        service_name, service_state = active_service(
-            ("campus-autologin.service", "cqu-autologin.service")
-        )
-        status.campus_service_name = service_name
-        status.campus_service = service_state
-
-        remote_name, remote_state = active_service(
-            ("campus-remote-recovery.service", "todesk-monitor.service"),
-            user=True,
-        )
-        status.remote_service_name = remote_name
-        status.remote_service = remote_state
+        if platform.system() == "Windows":
+            from . import windows
+            try:
+                for key, value in windows.read_status().items():
+                    if key in DesktopStatus.__dataclass_fields__:
+                        setattr(status, key, value)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                pass
+        else:
+            linux_target_status(status)
+            status.campus_service_name, status.campus_service, status.campus_enabled = active_service(campus_control.SERVICE_CANDIDATES)
+            status.remote_service_name, status.remote_service, status.remote_enabled = active_service(campus_control.REMOTE_SERVICES, user=True)
 
         if remote_health is not None:
             try:
@@ -251,12 +261,17 @@ class StatusWorker(QThread):
                 status.remote_detail = translate_remote_reason(selected_health.reason)
             else:
                 status.remote_detail = "未检测到受支持的远程控制软件"
-        elif run_command(["pgrep", "-x", "ToDesk"]):
+        elif platform.system() == "Linux" and run_command(["pgrep", "-x", "ToDesk"]):
             status.remote_client = "ToDesk"
             status.remote_state = "unknown"
             status.remote_detail = "深度健康模块不可用"
 
+        if platform.system() == "Windows":
+            self.completed.emit(status)
+            return
         logs: list[str] = []
+        service_name = status.campus_service_name
+        remote_name = status.remote_service_name
         if service_name:
             output = run_command(
                 ["journalctl", "-u", service_name, "-n", "12", "--no-pager", "-o", "cat"],
@@ -309,12 +324,17 @@ class StatusWorker(QThread):
 class UpdateWorker(QThread):
     completed = Signal(object)
 
-    def __init__(self, version: Version) -> None:
-        super().__init__()
+    def __init__(self, version: Version, automatic: bool, parent: QWidget) -> None:
+        super().__init__(parent)
         self.version = version
+        self.automatic = automatic
 
     def run(self) -> None:
-        self.completed.emit(UpdateChecker(self.version).check(automatic=False))
+        try:
+            result = UpdateChecker(self.version).check(automatic=self.automatic)
+        except (OSError, ValueError, UpdateBusy):
+            result = CheckResult("error", str(self.version), error_code="update_unavailable")
+        self.completed.emit(result)
 
 
 class ControlWorker(QThread):
@@ -344,12 +364,17 @@ class ControlWorker(QThread):
 
 
 CONTROL_ERROR_LABELS = {
+    "network_unavailable": "目标校园网尚未连接或没有可用的 IP 地址。",
+    "authentication_failed": "门户认证未成功，请检查账号、密码和认证设置。",
+    "operation_conflict": "另一项后台更改正在进行，请稍后重试。",
+    "control_busy": "另一项后台更改正在进行，请稍后重试。",
+    "one_shot_failed": "本次检测未能确认联网，请检查目标网络、IP 和门户设置。",
     "control_unavailable": "受保护控制组件尚未安装，请先运行新版安装程序。",
     "permission_denied": "操作已取消，或系统管理员授权未通过。",
     "operation_timeout": "系统授权或服务操作超时，请稍后重试。",
     "service_missing": "没有找到已安装的校园网自动认证服务。",
     "service_operation_failed": "后台服务未能完成操作，原有设置已尽量保留。",
-    "remote_service_failed": "远程维护服务操作失败，校园认证开关已回滚。",
+    "remote_service_failed": "远程维护服务操作失败，已尝试恢复原状态。",
     "partial_failure": "部分服务状态未能回滚，请检查后台服务状态。",
     "config_missing": "没有找到已保存的校园网配置。",
     "config_invalid": "新账号配置校验失败，原配置没有被替换。",
@@ -530,10 +555,9 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.main_window = parent
         self.worker: Optional[ControlWorker] = None
-        self.initial_enabled = (
-            status.campus_service == "active"
-            and status.remote_service in ("active", "missing")
-        )
+        self.initial_enabled = status.master_state()
+        self.update_store = UpdateStore()
+        self.initial_updates = self.update_store.load_preferences().update_check_enabled
         self.setWindowTitle("设置 · 校园网连接助手")
         self.setMinimumWidth(580)
         self.setModal(True)
@@ -555,7 +579,11 @@ class SettingsDialog(QDialog):
         panel_layout.setSpacing(12)
         self.master_switch = QCheckBox("启用自动连接与远程维护")
         self.master_switch.setObjectName("masterSwitch")
-        self.master_switch.setChecked(self.initial_enabled)
+        if self.initial_enabled is None:
+            self.master_switch.setTristate(True)
+            self.master_switch.setCheckState(Qt.PartiallyChecked)
+        else:
+            self.master_switch.setChecked(self.initial_enabled)
         panel_layout.addWidget(self.master_switch)
         explanation = QLabel(
             "关闭后，后台不再自动认证校园网，也不再自动恢复远程控制软件；"
@@ -565,7 +593,7 @@ class SettingsDialog(QDialog):
         explanation.setWordWrap(True)
         panel_layout.addWidget(explanation)
 
-        campus_state = "运行中" if status.campus_service == "active" else "已停止"
+        campus_state = {"active": "运行中", "inactive": "已停止", "missing": "未安装"}.get(status.campus_service, "待确认")
         remote_state = {
             "active": "运行中",
             "inactive": "已停止",
@@ -577,9 +605,12 @@ class SettingsDialog(QDialog):
         service_summary.setObjectName("serviceSummary")
         service_summary.setWordWrap(True)
         panel_layout.addWidget(service_summary)
+        self.update_switch = QCheckBox("允许每天向 GitHub 检查桌面版本更新")
+        self.update_switch.setChecked(self.initial_updates)
+        panel_layout.addWidget(self.update_switch)
         layout.addWidget(panel)
 
-        self.progress_label = QLabel("更改开关时，系统会要求管理员授权。")
+        self.progress_label = QLabel("部分选中表示服务状态不一致或尚未确认。")
         self.progress_label.setObjectName("muted")
         layout.addWidget(self.progress_label)
 
@@ -595,8 +626,16 @@ class SettingsDialog(QDialog):
         layout.addLayout(actions)
 
     def apply_change(self) -> None:
-        target = self.master_switch.isChecked()
-        if target == self.initial_enabled:
+        target = None if self.master_switch.checkState() == Qt.PartiallyChecked else self.master_switch.isChecked()
+        if self.update_switch.isChecked() != self.initial_updates:
+            try:
+                self.update_store.set_update_check_enabled(self.update_switch.isChecked())
+            except (OSError, UpdateBusy):
+                QMessageBox.warning(self, "更新设置未保存", "暂时无法写入更新偏好，请稍后重试。")
+                return
+            self.initial_updates = self.update_switch.isChecked()
+            self.main_window.refresh_update_preference()
+        if target is None or target == self.initial_enabled:
             self.accept()
             return
         if not target:
@@ -608,16 +647,17 @@ class SettingsDialog(QDialog):
                 QMessageBox.No,
             )
             if answer != QMessageBox.Yes:
-                self.master_switch.setChecked(True)
                 return
         self.apply_button.setEnabled(False)
         self.master_switch.setEnabled(False)
         self.progress_label.setText("正在等待系统授权并更新后台服务…")
         self.worker = ControlWorker("master", target, parent=self)
-        self.worker.completed.connect(lambda result: self.finish_change(result, target))
+        self.pending_target = target
+        self.worker.completed.connect(self.finish_change)
         self.worker.start()
 
-    def finish_change(self, result: desktop_control.ControlResult, target: bool) -> None:
+    def finish_change(self, result: desktop_control.ControlResult) -> None:
+        target = self.pending_target
         self.apply_button.setEnabled(True)
         self.master_switch.setEnabled(True)
         if not result.ok:
@@ -665,7 +705,7 @@ class AccountDialog(QDialog):
         layout.setSpacing(18)
         title = QLabel("校园网认证")
         title.setObjectName("dialogTitle")
-        subtitle = QLabel("可以使用已保存配置重新检测，也可以更换学校、认证方式和校园网账号。")
+        subtitle = QLabel("使用已保存配置检测联网，或更新校园网账号和认证方式。")
         subtitle.setObjectName("muted")
         layout.addWidget(title)
         layout.addWidget(subtitle)
@@ -677,7 +717,7 @@ class AccountDialog(QDialog):
         current_text = QVBoxLayout()
         current_title = QLabel("使用已保存账号")
         current_title.setObjectName("sectionTitle")
-        current_detail = QLabel("立即重启认证检测；不会显示或修改已保存密码。")
+        current_detail = QLabel("检查当前校园网连接，需要时尝试认证。")
         current_detail.setObjectName("muted")
         current_text.addWidget(current_title)
         current_text.addWidget(current_detail)
@@ -700,6 +740,7 @@ class AccountDialog(QDialog):
         school_label = QLabel("学校与认证方式")
         school_label.setObjectName("fieldLabel")
         self.school_type = QComboBox()
+        self.school_type.addItem("保留当前学校和认证设置，仅更换账号密码", "keep")
         self.school_type.addItem("重庆大学（CQU / Dr.COM 预设）", "cqu")
         self.school_type.addItem("其他学校（Dr.COM / ePortal）", "drcom")
         self.school_type.addItem("深澜 SRUN 校园网", "srun")
@@ -784,7 +825,7 @@ class AccountDialog(QDialog):
         account_layout.addWidget(privacy)
         layout.addWidget(account_panel)
 
-        self.progress_label = QLabel("更换账号会请求管理员授权，并短暂重启认证服务。")
+        self.progress_label = QLabel("保存后，正在运行的认证服务会重新加载配置。")
         self.progress_label.setObjectName("muted")
         layout.addWidget(self.progress_label)
 
@@ -792,7 +833,7 @@ class AccountDialog(QDialog):
         actions.addStretch()
         cancel = QPushButton("关闭")
         cancel.clicked.connect(self.reject)
-        self.save_button = QPushButton("保存学校与账号")
+        self.save_button = QPushButton("保存认证设置")
         self.save_button.setProperty("primary", True)
         self.save_button.clicked.connect(self.replace_account)
         actions.addWidget(cancel)
@@ -829,7 +870,9 @@ class AccountDialog(QDialog):
         ):
             pair[0].setVisible(visible[key])
             pair[1].setVisible(visible[key])
-        if school_type == "cqu":
+        if school_type == "keep":
+            self.school_hint.setText("保留已保存的门户地址、自定义字段和连接设置。")
+        elif school_type == "cqu":
             self.school_hint.setText("已内置重庆大学 Dr.COM 认证地址与账号前缀，无需填写服务器参数。")
         elif school_type == "drcom":
             self.school_hint.setText("适用于使用 Dr.COM 或 ePortal 登录接口的其他学校。")
@@ -842,7 +885,7 @@ class AccountDialog(QDialog):
             self.login_url.setPlaceholderText("例如 https://portal.example.edu/login")
 
     def reauthenticate(self) -> None:
-        self.set_busy(True, "正在等待系统授权并重新启动认证检测…")
+        self.set_busy(True, "正在检测目标网络与门户状态…")
         self.worker = ControlWorker("reauthenticate", parent=self)
         self.worker.completed.connect(self.finish_reauthentication)
         self.worker.start()
@@ -853,7 +896,7 @@ class AccountDialog(QDialog):
             QMessageBox.warning(self, "重新认证未完成", control_error_message(result.code))
             return
         self.main_window.refresh_status()
-        QMessageBox.information(self, "已重新检测", "认证服务已重新启动并立即检查当前网络状态。")
+        QMessageBox.information(self, "已重新检测", "已完成单次检测或通知运行中的认证服务重新检测。")
 
     def replace_account(self) -> None:
         username = self.username.text().strip()
@@ -917,7 +960,7 @@ class AccountDialog(QDialog):
         QMessageBox.information(
             self,
             "认证配置已更新",
-            "学校、认证方式和新账号已安全保存，认证服务已经重新检测当前网络。",
+            "认证配置已保存，后台沿用保存前的运行状态。",
         )
 
     def reject(self) -> None:
@@ -935,6 +978,8 @@ class MainWindow(QMainWindow):
         self.status = DesktopStatus()
         self.status_worker: Optional[StatusWorker] = None
         self.update_worker: Optional[UpdateWorker] = None
+        self.status_refresh_pending = False
+        self.quit_requested = False
         self.tray: Optional[QSystemTrayIcon] = None
         self.setWindowTitle("校园网连接助手")
         self.setWindowIcon(application_icon())
@@ -947,6 +992,10 @@ class MainWindow(QMainWindow):
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self.refresh_status)
         self.refresh_timer.start(30_000)
+        self.update_timer = QTimer(self)
+        self.update_timer.timeout.connect(self.check_automatically)
+        self.update_timer.start(30 * 60 * 1000)
+        self.refresh_update_preference()
 
     def build_ui(self) -> None:
         root = QWidget()
@@ -1264,7 +1313,7 @@ class MainWindow(QMainWindow):
         refresh_action.triggered.connect(self.refresh_status)
         menu.addSeparator()
         quit_action = menu.addAction("退出界面（后台服务继续）")
-        quit_action.triggered.connect(QApplication.instance().quit)
+        quit_action.triggered.connect(self.request_quit)
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(lambda reason: self.show_normal() if reason == QSystemTrayIcon.Trigger else None)
         self.tray.setToolTip("校园网连接助手")
@@ -1281,32 +1330,62 @@ class MainWindow(QMainWindow):
             event.ignore()
             self.tray.showMessage("校园网连接助手", "界面已隐藏，现有后台服务继续运行。")
             return
-        event.accept()
+        if self.workers_busy():
+            event.ignore()
+            self.request_quit()
+        else:
+            event.accept()
+
+    def workers_busy(self) -> bool:
+        return any(worker.isRunning() for worker in self.findChildren(QThread))
+
+    def request_quit(self) -> None:
+        self.quit_requested = True
+        self.refresh_timer.stop()
+        self.update_timer.stop()
+        if self.workers_busy():
+            QTimer.singleShot(150, self.request_quit)
+        else:
+            QApplication.instance().quit()
 
     def refresh_status(self) -> None:
-        if self.status_worker is not None and self.status_worker.isRunning():
+        if self.quit_requested:
+            return
+        if self.status_worker is not None:
+            self.status_refresh_pending = True
             return
         self.refresh_button.setEnabled(False)
         self.refresh_button.setText("检测中…")
         self.checked_label.setText("正在读取本机状态…")
         self.status_worker = StatusWorker(self)
         self.status_worker.completed.connect(self.apply_status)
-        self.status_worker.finished.connect(lambda: self.refresh_button.setEnabled(True))
-        self.status_worker.finished.connect(lambda: self.refresh_button.setText("立即检测"))
+        self.status_worker.finished.connect(self.finish_status_worker)
         self.status_worker.start()
+
+    def finish_status_worker(self) -> None:
+        if self.status_worker is not None:
+            self.status_worker.deleteLater()
+            self.status_worker = None
+        self.refresh_button.setEnabled(True)
+        self.refresh_button.setText("立即检测")
+        if self.status_refresh_pending:
+            self.status_refresh_pending = False
+            self.refresh_status()
 
     def apply_status(self, status: DesktopStatus) -> None:
         self.status = status
         state = status.overall
         self.orb.set_state(state)
-        title = "链路稳定" if state == "online" else "需要关注" if state == "attention" else "当前离线"
-        subtitle = (
-            "目标网络与认证服务正在工作"
-            if state == "online"
-            else "网络存在，但部分状态尚未确认"
-            if state == "attention"
-            else "未检测到可用的默认网络"
-        )
+        if state == "online":
+            title, subtitle = "链路稳定", "目标校园网已连接，公网检测成功"
+        elif status.network_state == "other":
+            title, subtitle = "当前为其他网络", "正在等待配置的校园网"
+        elif state == "offline":
+            title, subtitle = "目标网络离线", "等待目标网络恢复连接"
+        elif status.network_state == "connected":
+            title, subtitle = "目标网络已连接", "请查看公网与认证服务状态"
+        else:
+            title, subtitle = "目标网络待确认", "尚未取得有效的校园网检测结果"
         self.hero_title.setText(title)
         self.hero_subtitle.setText(subtitle)
         self.connection_value[1].setText(status.connection_name)
@@ -1322,8 +1401,8 @@ class MainWindow(QMainWindow):
 
         auth_ok = status.campus_service == "active"
         self.auth_card.update_content(
-            "运行中" if auth_ok else "未运行",
-            status.campus_service_name or "未发现校园网服务",
+            {"active": "运行中", "inactive": "已停止", "missing": "未安装"}.get(status.campus_service, "待确认"),
+            status.campus_service_name or ("未发现校园网服务" if status.campus_service == "missing" else "校园网服务状态待确认"),
             COLORS["green"] if auth_ok else COLORS["red"],
         )
         monitor_active = status.remote_service == "active"
@@ -1389,33 +1468,77 @@ class MainWindow(QMainWindow):
         dialog.setStyleSheet(self.styleSheet())
         dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
 
+    def refresh_update_preference(self) -> None:
+        store = UpdateStore()
+        enabled = store.load_preferences().update_check_enabled
+        title = f"当前 v{self.version}"
+        detail = "自动检查已开启" if enabled else "自动检查已关闭"
+        cache, _ = store.load_cache()
+        if cache.latest_version:
+            try:
+                latest = Version.parse(cache.latest_version)
+                if latest > self.version:
+                    title = f"发现 v{latest}"
+            except ValueError:
+                pass
+        self.update_card.update_content(title, detail, COLORS["cyan"])
+        if enabled:
+            QTimer.singleShot(0, self.check_automatically)
+
+    def check_automatically(self) -> None:
+        if UpdateStore().load_preferences().update_check_enabled:
+            self.start_update_check(True)
+
     def check_updates(self) -> None:
-        if self.update_worker is not None and self.update_worker.isRunning():
+        self.start_update_check(False)
+
+    def start_update_check(self, automatic: bool) -> None:
+        if self.quit_requested or self.update_worker is not None:
             return
         self.update_button.setEnabled(False)
         self.update_button.setText("检查中…")
-        self.update_card.update_content("正在检查", "连接 GitHub Releases", COLORS["amber"])
-        self.update_worker = UpdateWorker(self.version)
+        if not automatic:
+            self.update_card.update_content("正在检查", "连接 GitHub Releases", COLORS["amber"])
+        self.update_worker = UpdateWorker(self.version, automatic, self)
         self.update_worker.completed.connect(self.apply_update_result)
-        self.update_worker.finished.connect(lambda: self.update_button.setEnabled(True))
-        self.update_worker.finished.connect(lambda: self.update_button.setText("检查更新"))
+        self.update_worker.finished.connect(self.finish_update_worker)
         self.update_worker.start()
 
+    def finish_update_worker(self) -> None:
+        if self.update_worker is not None:
+            self.update_worker.deleteLater()
+            self.update_worker = None
+        self.update_button.setEnabled(True)
+        self.update_button.setText("检查更新")
+
     def apply_update_result(self, result: CheckResult) -> None:
-        if result.status == "update_available":
-            self.update_card.update_content(
-                f"发现 v{result.latest_version}",
-                "已确认来自官方 GitHub Release",
-                COLORS["green"],
-            )
-            QMessageBox.information(
-                self,
-                "发现新版本",
-                f"发现 v{result.latest_version}。\n\n{result.release_page}\n\n预览版只提醒，不会自动下载安装。",
-            )
+        automatic = bool(self.update_worker and self.update_worker.automatic)
+        if result.status.startswith("skipped"):
+            return
+        if result.status in ("update_available", "ignored", "snoozed"):
+            detail = {"ignored": "此版本已忽略", "snoozed": "此版本已暂缓提醒"}.get(result.status, "GitHub 桌面版本发布")
+            self.update_card.update_content(f"发现 v{result.latest_version}", detail, COLORS["green"])
+            if result.status != "update_available" or self.quit_requested:
+                return
+            if automatic and not result.notification_required:
+                return
+            notice = f"发现 v{result.latest_version}。\n{result.release_page}"
+            if automatic and self.tray is not None:
+                self.tray.showMessage("桌面版本更新", notice)
+            elif not automatic or self.isVisible():
+                QMessageBox.information(self, "发现新版本", notice)
+            else:
+                return
+            if result.latest_version:
+                try:
+                    UpdateChecker(self.version).mark_notified(Version.parse(result.latest_version))
+                except (ValueError, OSError, UpdateBusy):
+                    pass
+        elif result.status == "no_desktop_release":
+            self.update_card.update_content(f"当前 v{self.version}", "尚无正式桌面版本", COLORS["cyan"])
         elif result.status == "error":
             self.update_card.update_content("检查失败", result.error_code or "未知错误", COLORS["red"])
-        else:
+        elif result.status == "up_to_date":
             self.update_card.update_content(f"当前 v{self.version}", "已经是最新版本", COLORS["green"])
 
 
@@ -1426,12 +1549,21 @@ def run_gui(version: Version) -> int:
         app.setDesktopFileName("campus-network-assistant")
     app.setWindowIcon(application_icon())
     app.setQuitOnLastWindowClosed(True)
-    lock_path = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "campus-network-assistant-preview.lock"
-    lock = QLockFile(str(lock_path))
-    lock.setStaleLockTime(30_000)
+    runtime = os.environ.get("XDG_RUNTIME_DIR") if platform.system() == "Linux" else None
+    lock_dir = Path(runtime) if runtime else default_state_dir()
+    try:
+        lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError:
+        QMessageBox.warning(None, "无法启动", "无法创建当前用户的运行目录。")
+        return 2
+    lock = QLockFile(str(lock_dir / "campus-network-assistant.lock"))
+    lock.setStaleLockTime(0)
     if not lock.tryLock(100):
-        QMessageBox.information(None, "校园网连接助手", "窗口已经在运行。")
-        return 0
+        if lock.error() == QLockFile.LockFailedError:
+            QMessageBox.information(None, "校园网连接助手", "窗口已经在运行。")
+            return 0
+        QMessageBox.warning(None, "无法启动", "无法访问当前用户的程序锁，请检查运行目录权限。")
+        return 2
     app.setFont(QFont("Noto Sans CJK SC", 10))
     window = MainWindow(version)
     if window.tray is not None:

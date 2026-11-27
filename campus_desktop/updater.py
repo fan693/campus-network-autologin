@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import http.client
 import json
 import os
 import re
@@ -14,6 +15,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timedelta, timezone
+from functools import total_ordering
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional
 
@@ -69,24 +71,41 @@ class UpdateBusy(UpdateError):
     code = "operation_conflict"
 
 
-@dataclass(frozen=True, order=True)
+@total_ordering
+@dataclass(frozen=True)
 class Version:
     major: int
     minor: int
     patch: int
+    preview: Optional[int] = None
+
+    def _order(self) -> tuple:
+        return (self.major, self.minor, self.patch, self.preview is None, self.preview or 0)
+
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, Version):
+            return NotImplemented
+        return self._order() < other._order()
 
     @classmethod
-    def parse(cls, value: str, *, allow_v_prefix: bool = False) -> "Version":
+    def parse(cls, value: str, *, allow_v_prefix: bool = False, allow_preview: bool = False) -> "Version":
         text = value.strip()
         if allow_v_prefix and text.startswith("v"):
             text = text[1:]
+        preview = None
+        if allow_preview and "-preview." in text:
+            text, number = text.split("-preview.", 1)
+            if not re.fullmatch(r"[1-9][0-9]{0,5}", number):
+                raise ValueError("invalid preview number")
+            preview = int(number)
         match = VERSION_PATTERN.fullmatch(text)
         if match is None:
             raise ValueError("version must use MAJOR.MINOR.PATCH")
-        return cls(*(int(part) for part in match.groups()))
+        return cls(*(int(part) for part in match.groups()), preview=preview)
 
     def __str__(self) -> str:
-        return f"{self.major}.{self.minor}.{self.patch}"
+        stable = f"{self.major}.{self.minor}.{self.patch}"
+        return stable if self.preview is None else f"{stable}-preview.{self.preview}"
 
 
 @dataclass(frozen=True)
@@ -227,7 +246,7 @@ def local_version_path() -> Path:
 def load_local_version(path: Optional[Path] = None) -> Version:
     source = path or local_version_path()
     try:
-        return Version.parse(source.read_text(encoding="utf-8"))
+        return Version.parse(source.read_text(encoding="utf-8"), allow_preview=True)
     except OSError as exc:
         raise ValueError("local VERSION file is unavailable") from exc
 
@@ -309,7 +328,7 @@ class GitHubReleaseClient:
                 reset_at = _rate_limit_timestamp(exc.headers.get("X-RateLimit-Reset"))
                 raise UpdateRateLimited(reset_at) from exc
             raise UpdateUnavailable("GitHub Release request failed") from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as exc:
             raise UpdateUnavailable("GitHub Release request failed") from exc
 
         try:
@@ -339,7 +358,7 @@ class GitHubReleaseClient:
                 continue
             releases.append(ReleaseInfo(version, tag_name, html_url, published_at))
         if not releases:
-            raise UpdateInvalidResponse("no stable desktop application Release was found")
+            return FetchResult("no_desktop_release", None, response_etag)
         latest = max(releases, key=lambda release: release.version)
         return FetchResult(
             "ok",
@@ -536,9 +555,12 @@ class UpdateChecker:
 
         cache.last_success_at = format_timestamp(now)
         cache.rate_limit_until = None
-        if fetched.etag is not None:
+        if fetched.state != "not_modified":
             cache.etag = fetched.etag
-        if fetched.release is not None:
+        if fetched.state == "no_desktop_release":
+            cache.latest_version = None
+            cache.release_page = None
+        elif fetched.release is not None:
             cache.latest_version = str(fetched.release.version)
             cache.release_page = fetched.release.html_url
         self.store.save_cache(cache)
@@ -570,7 +592,7 @@ class UpdateChecker:
 
     def _result_from_cache(self, cache: UpdateCache, now: datetime) -> CheckResult:
         if not cache.latest_version or not cache.release_page:
-            return CheckResult("up_to_date", str(self.current_version))
+            return CheckResult("no_desktop_release", str(self.current_version))
         try:
             latest = Version.parse(cache.latest_version)
         except ValueError:

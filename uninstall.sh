@@ -38,6 +38,9 @@ rm -f "${NETWORK_POLKIT_FILE}"
 
 systemctl disable --now campus-autologin.service 2>/dev/null || true
 rm -f /etc/systemd/system/campus-autologin.service
+rm -f /usr/local/bin/campus-network-assistant \
+  /usr/local/share/applications/campus-network-assistant.desktop \
+  /usr/local/share/icons/hicolor/scalable/apps/campus-network-assistant.svg
 rm -rf /usr/local/lib/campus-autologin
 if [[ "${PURGE}" == true ]]; then rm -rf /etc/campus-autologin; else
   echo "已保留 /etc/campus-autologin 中的配置和日志；如需清除请使用 --purge。"

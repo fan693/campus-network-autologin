@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import tempfile
+from pathlib import Path
 import unittest
 
 from campus_desktop import updater
@@ -64,13 +66,24 @@ class DesktopReleaseChannelTests(unittest.TestCase):
         self.assertEqual(request.full_url, updater.RELEASES_API)
         self.assertEqual(timeout, updater.CONNECT_TIMEOUT)
 
-    def test_release_list_without_app_tag_is_rejected(self) -> None:
+    def test_release_list_without_app_tag_clears_previous_release(self) -> None:
         client = updater.GitHubReleaseClient(
             updater.Version.parse("1.0.0"),
             opener=FakeOpener([release("v4.2.0")]),
         )
-        with self.assertRaises(updater.UpdateInvalidResponse):
-            client.fetch_latest()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = updater.UpdateStore(root, root / "prefs.json")
+            store.save_cache(updater.UpdateCache(latest_version="2.0.0", release_page="old"))
+            checker = updater.UpdateChecker(client.current_version, store=store, client=client)
+            self.assertEqual(checker.check().status, "no_desktop_release")
+            self.assertIsNone(store.load_cache()[0].latest_version)
+
+    def test_preview_can_upgrade_to_same_numbered_stable_release(self) -> None:
+        preview = updater.Version.parse("1.0.0-preview.1", allow_preview=True)
+        self.assertLess(preview, updater.Version.parse("1.0.0"))
+        self.assertGreater(preview, updater.Version.parse("0.9.9"))
+        self.assertEqual(str(preview), "1.0.0-preview.1")
 
     def test_app_release_page_must_remain_in_official_repository(self) -> None:
         item = release("app-v1.1.0")

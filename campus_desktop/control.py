@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import stat
 import subprocess
 from dataclasses import dataclass
@@ -39,7 +40,7 @@ def trusted_helper() -> Optional[Path]:
     return PRIVILEGED_HELPER
 
 
-def invoke_privileged(action: str, payload: dict[str, Any], timeout: int = 120) -> ControlResult:
+def invoke_privileged(action: str, payload: dict[str, Any], timeout: int = 240) -> ControlResult:
     helper = trusted_helper()
     if helper is None or not PKEXEC.is_file() or not PYTHON.is_file():
         return ControlResult(False, "control_unavailable")
@@ -57,8 +58,10 @@ def invoke_privileged(action: str, payload: dict[str, Any], timeout: int = 120) 
                 "DBUS_SESSION_BUS_ADDRESS", "XDG_SESSION_TYPE", "LANG", "LC_ALL",
             }},
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except subprocess.TimeoutExpired:
         return ControlResult(False, "operation_timeout")
+    except OSError:
+        return ControlResult(False, "control_unavailable")
     if result.returncode != 0 and not result.stdout.strip():
         return ControlResult(False, "permission_denied")
     try:
@@ -72,55 +75,22 @@ def invoke_privileged(action: str, payload: dict[str, Any], timeout: int = 120) 
     return ControlResult(ok, code if isinstance(code, str) else "invalid_response")
 
 
-def user_service() -> Optional[str]:
-    for service in REMOTE_SERVICES:
-        try:
-            result = subprocess.run(
-                ["systemctl", "--user", "show", service, "-p", "LoadState", "--value"],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            continue
-        if result.returncode == 0 and result.stdout.strip() == "loaded":
-            return service
-    return None
-
-
-def set_user_service(service: str, enabled: bool) -> bool:
-    operation = "enable" if enabled else "disable"
-    try:
-        result = subprocess.run(
-            ["systemctl", "--user", operation, "--now", service],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return result.returncode == 0
-
-
 def set_master_enabled(enabled: bool) -> ControlResult:
-    result = invoke_privileged("set-enabled", {"enabled": enabled})
-    if not result.ok:
-        return result
-    remote = user_service()
-    if remote is None or set_user_service(remote, enabled):
-        return result
-    rollback = invoke_privileged("set-enabled", {"enabled": not enabled})
-    return ControlResult(False, "remote_service_failed" if rollback.ok else "partial_failure")
+    if platform.system() == "Windows":
+        from . import windows
+        return ControlResult(*windows.set_master_enabled(enabled))
+    return invoke_privileged("set-enabled", {"enabled": enabled})
 
 
 def reauthenticate() -> ControlResult:
+    if platform.system() == "Windows":
+        from . import windows
+        return ControlResult(*windows.reauthenticate())
     return invoke_privileged("reauthenticate", {})
 
 
 def replace_profile(profile: dict[str, str]) -> ControlResult:
-    return invoke_privileged(
-        "replace-profile",
-        profile,
-    )
+    if platform.system() == "Windows":
+        from . import windows
+        return ControlResult(*windows.replace_profile(profile))
+    return invoke_privileged("replace-profile", profile)
