@@ -6,8 +6,10 @@ on:
 
 jobs:
   python:
-    runs-on: ubuntu-latest
+    # setup-python provides 3.8 on 22.04, including for the legacy Ubuntu target.
+    runs-on: ubuntu-22.04
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.8", "3.10", "3.12", "3.13"]
     steps:
