@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import io
 import json
+import socket
+import struct
 import tempfile
 import unittest
 import urllib.error
 import urllib.parse
 from pathlib import Path
+from contextlib import ExitStack
+from dataclasses import replace
+from http.client import IncompleteRead
 from unittest import mock
 
 import campus_autologin as app
@@ -136,6 +141,80 @@ class ConfigurationTests(unittest.TestCase):
 
 
 class NetworkDetectionTests(unittest.TestCase):
+    def test_named_network_resolves_its_own_interface_on_both_platforms(self) -> None:
+        config = replace(make_config({"type": "drcom", "login_url": "https://portal.test"}),
+                         network_name="Campus:WiFi", interface="")
+        with mock.patch.object(app.platform, "system", return_value="Linux"):
+            with mock.patch.object(app, "run_command", return_value=r"Home:eth0" + "\n" + r"Campus\:WiFi:wlan0"):
+                self.assertEqual(app.select_network(config), app.NetworkSelection("connected", "wlan0"))
+        profiles = [{"Name": "Home", "InterfaceAlias": "Ethernet"}, {"Name": "Campus:WiFi", "InterfaceAlias": "Wi-Fi"}]
+        with mock.patch.object(app.platform, "system", return_value="Windows"):
+            with mock.patch.object(app, "windows_connection_profiles", return_value=profiles):
+                self.assertEqual(app.select_network(config), app.NetworkSelection("connected", "Wi-Fi"))
+            with mock.patch.object(app, "run_command", return_value='{"IPAddress":"192.0.2.2","InterfaceIndex":7}'):
+                self.assertEqual(app.interface_binding("Wi-Fi", 5), app.InterfaceBinding("Wi-Fi", 7, "192.0.2.2"))
+
+    def test_selected_interface_without_ipv4_never_uses_another_address(self) -> None:
+        config = make_config({"type": "drcom", "login_url": "https://portal.test"})
+        with ExitStack() as stack:
+            system = stack.enter_context(mock.patch.object(app.platform, "system", return_value="Linux"))
+            stack.enter_context(mock.patch.object(app, "linux_ipv4", return_value=None))
+            stack.enter_context(mock.patch.object(socket, "if_nametoindex", return_value=2))
+            stack.enter_context(mock.patch.object(app, "run_command", return_value=""))
+            default_socket = stack.enter_context(mock.patch.object(socket, "socket"))
+            self.assertIsNone(app.get_ipv4(config))
+            system.return_value = "Windows"
+            self.assertIsNone(app.get_ipv4(config))
+            default_socket.assert_not_called()
+
+    def test_old_linux_kernel_without_device_binding_rejects_a_different_route(self) -> None:
+        binding = app.InterfaceBinding("campus0", 7, "192.0.2.8")
+        address = (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.20", 80))
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(app.platform, "system", return_value="Linux"))
+            stack.enter_context(mock.patch.object(socket, "SO_BINDTODEVICE", 25, create=True))
+            stack.enter_context(mock.patch.object(socket, "getaddrinfo", return_value=[address]))
+            tcp = stack.enter_context(mock.patch.object(socket, "socket")).return_value
+            tcp.setsockopt.side_effect = [None, PermissionError()]
+            route = stack.enter_context(mock.patch.object(app, "run_command", return_value='[{"dev":"other0"}]'))
+            with self.assertRaisesRegex(OSError, "selected interface"):
+                binding.connect(("probe.test", 80), 5)
+            tcp.connect.assert_not_called()
+            tcp.close.assert_called_once()
+            self.assertIn(binding.ipv4, route.call_args.args[0])
+
+    def test_bound_http_and_https_connect_via_the_selected_interface(self) -> None:
+        binding = app.InterfaceBinding("campus0", 7, "192.0.2.8")
+        for system in ("Linux", "Windows"):
+            for scheme in ("http", "https"):
+                with self.subTest(system=system, scheme=scheme), ExitStack() as stack:
+                    stack.enter_context(mock.patch.object(app.platform, "system", return_value=system))
+                    stack.enter_context(mock.patch.object(socket, "SO_BINDTODEVICE", 25, create=True))
+                    addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.20", 443))]
+                    stack.enter_context(mock.patch.object(socket, "getaddrinfo", return_value=addresses))
+                    tcp = stack.enter_context(mock.patch.object(socket, "socket")).return_value
+                    tcp.makefile.return_value = io.BytesIO(b"HTTP/1.1 204 No Content\r\n\r\n")
+                    tls = stack.enter_context(mock.patch.object(app.ssl.SSLContext, "wrap_socket", return_value=tcp))
+                    opener = app.build_opener(follow_redirects=False, binding=binding)
+                    with opener.open(scheme + "://portal.test/check", timeout=5) as response:
+                        self.assertEqual(response.status, 204)
+                    option = getattr(socket, "IP_UNICAST_IF", 31 if system == "Windows" else 50)
+                    tcp.setsockopt.assert_any_call(socket.IPPROTO_IP, option, struct.pack("!I", 7))
+                    tcp.bind.assert_called_once_with(("192.0.2.8", 0))
+                    tcp.connect.assert_called_once_with(("192.0.2.20", 443))
+                    if scheme == "https":
+                        self.assertEqual(tls.call_args.kwargs["server_hostname"], "portal.test")
+
+    def test_recovery_skips_other_profiles_and_failed_observation(self) -> None:
+        config = make_config({"type": "drcom", "login_url": "https://portal.test"})
+        for active in ("Home", None):
+            with self.subTest(active=active), mock.patch.object(app.platform, "system", return_value="Linux"):
+                network = mock.Mock()
+                network.command.return_value = "wifi"
+                network.active_connection.return_value = active
+                self.assertFalse(app.recover_linux_network(config, network))
+                self.assertEqual(network.command.call_count, 1)
+
     def test_linux_connection_name_uses_utf8_locale(self) -> None:
         completed = mock.Mock(returncode=0, stdout="有线连接 1\n")
         with mock.patch.object(app.subprocess, "run", return_value=completed) as run:
@@ -161,7 +240,11 @@ class NetworkDetectionTests(unittest.TestCase):
                 "login_url": "https://portal.example/login",
             }
         )
-        outputs = ["wifi", "Campus-WiFi", "profile-uuid", "", "", "", "activated"]
+        active_path = "/org/freedesktop/NetworkManager/ActiveConnection/3"
+        outputs = [
+            "wifi", "Campus-WiFi", "profile-uuid", active_path, "", "",
+            "Campus-WiFi", "", "", "30 (disconnected)", "activated",
+        ]
         with mock.patch.object(app.platform, "system", return_value="Linux"):
             with mock.patch.object(app, "run_command", side_effect=outputs) as run:
                 with mock.patch.object(app, "interruptible_sleep"):
@@ -172,7 +255,7 @@ class NetworkDetectionTests(unittest.TestCase):
         commands = [call.args[0] for call in run.call_args_list]
         self.assertIn(["resolvectl", "flush-caches"], commands)
         self.assertIn(
-            ["nmcli", "connection", "down", "uuid", "profile-uuid"], commands
+            ["nmcli", "connection", "down", "apath", active_path], commands
         )
         self.assertIn(
             [
@@ -263,6 +346,20 @@ class ProtocolTests(unittest.TestCase):
 
 
 class ConnectivityTests(unittest.TestCase):
+    def test_incomplete_responses_are_retryable_and_portal_bodies_are_not_logged(self) -> None:
+        for portal in (
+            {"type": "drcom", "login_url": "https://portal.test"},
+            {"type": "srun", "base_url": "https://portal.test"},
+            {"type": "generic", "login_url": "https://portal.test", "success_contains": ["OK"]},
+        ):
+            with self.subTest(portal=portal["type"]), mock.patch.object(app, "log") as log:
+                config = make_config(portal)
+                interrupted = mock.Mock()
+                interrupted.open.side_effect = IncompleteRead(b"", 2)
+                self.assertFalse(app.internet_online(interrupted, config))
+                self.assertFalse(app.portal_login(interrupted, config, "192.0.2.2", ""))
+                self.assertFalse(app.portal_login(SequenceOpener([FakeResponse("private form data")]), config, "192.0.2.2", ""))
+                self.assertNotIn("private form data", str(log.call_args_list))
     def test_exact_204_is_online(self) -> None:
         config = make_config(
             {
@@ -290,14 +387,47 @@ class ConnectivityTests(unittest.TestCase):
 class RunLoopTests(unittest.TestCase):
     def setUp(self) -> None:
         app.RUNNING = True
+        self.selection = app.NetworkSelection("connected", "wlan0")
+        self.binding = app.InterfaceBinding("wlan0", 4, "10.0.0.2")
 
     def tearDown(self) -> None:
         app.RUNNING = True
 
+    def test_if_network_changes_after_probe_the_portal_is_not_contacted(self) -> None:
+        config = make_config({"type": "drcom", "login_url": "https://portal.test"})
+        other = app.NetworkSelection("other", "wlan0")
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(app, "select_network", side_effect=[self.selection, other]))
+            stack.enter_context(mock.patch.object(app, "interface_binding", return_value=self.binding))
+            opening = stack.enter_context(mock.patch.object(app, "build_opener"))
+            stack.enter_context(mock.patch.object(app, "internet_online", return_value=False))
+            login = stack.enter_context(mock.patch.object(app, "portal_login"))
+            status = mock.Mock()
+            self.assertEqual(app.run(config, once=True, report_status=status), 2)
+            self.assertEqual(opening.call_args_list, [
+                mock.call(follow_redirects=False, binding=self.binding),
+                mock.call(follow_redirects=True, binding=self.binding),
+            ])
+            status.assert_called_with("other", "unknown", "wlan0")
+            login.assert_not_called()
+
+    def test_other_network_and_telemetry_failure_never_trigger_recovery(self) -> None:
+        config = make_config({"type": "drcom", "login_url": "https://portal.test"})
+        for state in ("other", "unknown"):
+            with self.subTest(state=state), ExitStack() as stack:
+                app.RUNNING = True
+                stack.enter_context(mock.patch.object(app.platform, "system", return_value="Linux"))
+                stack.enter_context(mock.patch.object(app, "select_network", return_value=app.NetworkSelection(state, "wlan0")))
+                stack.enter_context(mock.patch.object(app.NetworkRecoveryState, "observe_offline", return_value=True))
+                stack.enter_context(mock.patch.object(app, "interruptible_sleep", side_effect=lambda _: app.stop_handler(0, None)))
+                recover = stack.enter_context(mock.patch.object(app, "recover_linux_network"))
+                self.assertEqual(app.run(config), 0)
+                recover.assert_not_called()
+
     def test_once_does_not_login_when_network_does_not_match(self) -> None:
         config = make_config({"type": "drcom", "login_url": "https://portal.example/login"})
         with mock.patch.object(app, "build_opener"):
-            with mock.patch.object(app, "network_matches", return_value=False):
+            with mock.patch.object(app, "select_network", return_value=app.NetworkSelection("other", "wlan0")):
                 with mock.patch.object(app, "portal_login") as login:
                     self.assertEqual(app.run(config, once=True), 2)
         login.assert_not_called()
@@ -305,8 +435,8 @@ class RunLoopTests(unittest.TestCase):
     def test_once_returns_failure_when_portal_rejects_login(self) -> None:
         config = make_config({"type": "drcom", "login_url": "https://portal.example/login"})
         with mock.patch.object(app, "build_opener"):
-            with mock.patch.object(app, "network_matches", return_value=True):
-                with mock.patch.object(app, "get_ipv4", return_value="10.0.0.2"):
+            with mock.patch.object(app, "select_network", return_value=self.selection):
+                with mock.patch.object(app, "interface_binding", return_value=self.binding):
                     with mock.patch.object(app, "internet_online", return_value=False):
                         with mock.patch.object(app, "get_ipv6", return_value=""):
                             with mock.patch.object(app, "portal_login", return_value=False):
@@ -317,8 +447,8 @@ class RunLoopTests(unittest.TestCase):
         def stop(_seconds: int) -> None:
             app.stop_handler(15, None)
         with mock.patch.object(app, "build_opener"):
-            with mock.patch.object(app, "network_matches", return_value=True):
-                with mock.patch.object(app, "get_ipv4", return_value="10.0.0.2"):
+            with mock.patch.object(app, "select_network", return_value=self.selection):
+                with mock.patch.object(app, "interface_binding", return_value=self.binding):
                     with mock.patch.object(app, "internet_online", return_value=True):
                         with mock.patch.object(app, "interruptible_sleep", side_effect=stop):
                             self.assertEqual(app.run(config), 0)

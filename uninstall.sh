@@ -15,10 +15,11 @@ REMOTE_SERVICE_NAME="campus-remote-recovery.service"
 REMOTE_USER_FILE="/etc/campus-autologin/remote-user"
 REMOTE_SUDOERS_FILE="/etc/sudoers.d/campus-remote-recovery"
 NETWORK_POLKIT_FILE="/etc/polkit-1/rules.d/49-campus-autologin-network.rules"
+NETWORK_PKLA_FILE="/etc/polkit-1/localauthority/50-local.d/49-campus-autologin-network.pkla"
 
 if [[ -f "${REMOTE_USER_FILE}" ]]; then
   REMOTE_USER="$(head -n 1 "${REMOTE_USER_FILE}")"
-  if getent passwd "${REMOTE_USER}" >/dev/null; then
+  if getent passwd "${REMOTE_USER}" >/dev/null && [[ "$(id -u "${REMOTE_USER}")" != 0 ]]; then
     REMOTE_UID="$(id -u "${REMOTE_USER}")"
     REMOTE_HOME="$(getent passwd "${REMOTE_USER}" | cut -d: -f6)"
     if [[ -S "/run/user/${REMOTE_UID}/bus" ]]; then
@@ -28,13 +29,14 @@ if [[ -f "${REMOTE_USER_FILE}" ]]; then
         DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${REMOTE_UID}/bus" \
         systemctl --user disable --now "${REMOTE_SERVICE_NAME}" 2>/dev/null || true
     fi
-    rm -f "${REMOTE_HOME}/.config/systemd/user/${REMOTE_SERVICE_NAME}"
-    rm -f "${REMOTE_HOME}/.config/systemd/user/default.target.wants/${REMOTE_SERVICE_NAME}"
-    rm -f "${REMOTE_HOME}/.config/systemd/user/graphical-session.target.wants/${REMOTE_SERVICE_NAME}"
+    runuser -u "${REMOTE_USER}" -- rm -f -- \
+      "${REMOTE_HOME}/.config/systemd/user/${REMOTE_SERVICE_NAME}" \
+      "${REMOTE_HOME}/.config/systemd/user/default.target.wants/${REMOTE_SERVICE_NAME}" \
+      "${REMOTE_HOME}/.config/systemd/user/graphical-session.target.wants/${REMOTE_SERVICE_NAME}"
   fi
 fi
 rm -f "${REMOTE_SUDOERS_FILE}"
-rm -f "${NETWORK_POLKIT_FILE}"
+rm -f "${NETWORK_POLKIT_FILE}" "${NETWORK_PKLA_FILE}"
 
 systemctl disable --now campus-autologin.service 2>/dev/null || true
 rm -f /etc/systemd/system/campus-autologin.service
@@ -43,6 +45,11 @@ rm -f /usr/local/bin/campus-network-assistant \
   /usr/local/share/icons/hicolor/scalable/apps/campus-network-assistant.svg
 rm -rf /usr/local/lib/campus-autologin
 if [[ "${PURGE}" == true ]]; then rm -rf /etc/campus-autologin; else
+  # The dedicated group may be removed with the service user and its ID reused.
+  if [[ -d /etc/campus-autologin ]]; then
+    chown root:root /etc/campus-autologin
+    chmod 0700 /etc/campus-autologin
+  fi
   echo "已保留 /etc/campus-autologin 中的配置和日志；如需清除请使用 --purge。"
 fi
 systemctl daemon-reload

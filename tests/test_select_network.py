@@ -15,7 +15,7 @@ class NetworkDiscoveryTests(unittest.TestCase):
                 "wlan0:wifi:disconnected\n"
                 "docker0:bridge:connected\n"
             ),
-            ("nmcli", "-g", "GENERAL.CONNECTION", "device", "show", "eno1"): (
+            ("nmcli", "--escape", "no", "-g", "GENERAL.CONNECTION", "device", "show", "eno1"): (
                 "有线连接 1"
             ),
         }

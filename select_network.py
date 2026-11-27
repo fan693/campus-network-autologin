@@ -53,7 +53,7 @@ def active_candidates(
         if state != "connected" or network_type not in SUPPORTED_TYPES:
             continue
         connection = run(
-            ["nmcli", "-g", "GENERAL.CONNECTION", "device", "show", interface]
+            ["nmcli", "--escape", "no", "-g", "GENERAL.CONNECTION", "device", "show", interface]
         )
         if connection and connection != "--":
             candidates.append(NetworkCandidate(connection, interface, network_type))

@@ -447,7 +447,7 @@ def parse_todesk_center_log(path: Path) -> tuple[str, Optional[str]]:
     return state, endpoint
 
 
-def established_tcp_peers() -> set[str]:
+def established_tcp_peers() -> Optional[set[str]]:
     try:
         result = subprocess.run(
             ["ss", "-Htn", "state", "established"],
@@ -457,9 +457,9 @@ def established_tcp_peers() -> set[str]:
             timeout=5,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return set()
+        return None
     if result.returncode != 0:
-        return set()
+        return None
     return {line.split()[-1] for line in result.stdout.splitlines() if line.split()}
 
 
@@ -476,10 +476,12 @@ def todesk_center_state(
     if endpoint is None:
         return "unknown"
     active_peers = established_tcp_peers() if peers is None else peers
+    if active_peers is None:
+        return "unknown"
     return "online" if endpoint in active_peers else "offline"
 
 
-def local_port_open(port: int, timeout: float = 1.0) -> bool:
+def local_port_open(port: int, timeout: float = 1.0) -> Optional[bool]:
     try:
         result = subprocess.run(
             ["ss", "-Hltn"],
@@ -499,8 +501,10 @@ def local_port_open(port: int, timeout: float = 1.0) -> bool:
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=timeout):
             return True
-    except OSError:
+    except ConnectionRefusedError:
         return False
+    except OSError:
+        return None
 
 
 @lru_cache(maxsize=None)
@@ -597,7 +601,7 @@ def command_connection_state(app: RemoteApp) -> str:
 
 def has_deep_health_probe(app: RemoteApp) -> bool:
     if platform.system() == "Linux" and app.key == "todesk":
-        return latest_todesk_service_log() is not None
+        return todesk_center_state() != "unknown"
     if app.key == "anydesk":
         return command_connection_state(app) != "unknown"
     return False
@@ -610,7 +614,10 @@ def app_health(app: RemoteApp, process_names: Optional[set[str]] = None) -> Heal
     if service == "offline":
         return HealthStatus("unhealthy", "background service is not running", 3)
     if platform.system() == "Linux" and app.key == "todesk":
-        if not local_port_open(TODESK_CONTROL_PORT):
+        port_state = local_port_open(TODESK_CONTROL_PORT)
+        if port_state is None:
+            return HealthStatus("unknown", "local control port state is unavailable", 3)
+        if not port_state:
             return HealthStatus(
                 "unhealthy",
                 f"local control port {TODESK_CONTROL_PORT} is unavailable",
@@ -869,31 +876,36 @@ def monitor(
     log(f"monitor started; detected={names}")
     state = ConnectivityState(failure_threshold, recovery_threshold)
     opener = build_opener(follow_redirects=False)
-    last_action = {app.key: 0.0 for app in apps}
+    last_action: dict[str, float] = {}
+    pending_refresh: set[str] = set()
     health_failures = {app.key: 0 for app in apps}
-    last_service_restart = 0.0
+    last_service_restart: Optional[float] = None
 
     while RUNNING:
         online = internet_online(opener, ConnectivityConfig())
         event = state.observe(online)
-        now = time.monotonic()
         if event == "offline":
             log("internet is offline; waiting for campus network recovery")
         elif event == "online":
             log("internet is online")
         elif event == "recovered":
             log("internet recovered; checking detected remote-control clients")
-            for app in apps:
-                if (
-                    not has_deep_health_probe(app)
-                    and now - last_action[app.key] >= cooldown
-                ):
-                    restart_app(app, "internet connection recovered")
-                    last_action[app.key] = now
+            pending_refresh.update(app.key for app in apps)
 
         if state.state == "online":
             processes = running_process_names()
             for app in apps:
+                now = time.monotonic()
+                can_restart = app.key not in last_action or now - last_action[app.key] >= cooldown
+                if app.key in pending_refresh:
+                    if has_deep_health_probe(app):
+                        pending_refresh.discard(app.key)
+                    elif can_restart:
+                        restart_app(app, "internet connection recovered")
+                        last_action[app.key] = time.monotonic()
+                        health_failures[app.key] = 0
+                        pending_refresh.discard(app.key)
+                        continue
                 status = app_health(app, processes)
                 if status.state != "unhealthy":
                     health_failures[app.key] = 0
@@ -903,17 +915,19 @@ def monitor(
                     log(f"{app.display_name} health check failed: {status.reason}")
                 if (
                     health_failures[app.key] >= status.failure_threshold
-                    and now - last_action[app.key] >= cooldown
+                    and can_restart
                 ):
-                    allow_service_restart = now - last_service_restart >= service_cooldown
+                    allow_service_restart = (
+                        last_service_restart is None or now - last_service_restart >= service_cooldown
+                    )
                     _, service_restarted = recover_app(
                         app,
                         status.reason,
                         allow_service_restart,
                     )
-                    last_action[app.key] = now
+                    last_action[app.key] = time.monotonic()
                     if service_restarted:
-                        last_service_restart = now
+                        last_service_restart = last_action[app.key]
                     health_failures[app.key] = 0
 
         interval = online_interval if state.state == "online" else offline_interval

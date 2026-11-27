@@ -10,7 +10,6 @@ $py = Get-Command py.exe -ErrorAction SilentlyContinue
 if (-not (Test-Path -LiteralPath (Join-Path $InstallDir "configure.py"))) {
     throw "The installed program was not found. Run install.ps1 first."
 }
-Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 
 if ($py) {
     & $py.Source -3 (Join-Path $InstallDir "configure.py") --existing $ConfigFile --output $ConfigFile
@@ -33,5 +32,9 @@ $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
 )
 $acl.AddAccessRule($rule)
 Set-Acl -LiteralPath $ConfigFile -AclObject $acl
-Start-ScheduledTask -TaskName $TaskName
-Write-Host "Configuration updated and the background task restarted."
+$task = Get-ScheduledTask -TaskName $TaskName
+if ($task.State -eq "Running") {
+    Stop-ScheduledTask -TaskName $TaskName
+    Start-ScheduledTask -TaskName $TaskName
+}
+Write-Host "Configuration updated."

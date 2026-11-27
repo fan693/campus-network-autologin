@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
 import hashlib
 import hmac
+import http.client
+import ipaddress
 import json
 import os
 import platform
@@ -23,7 +26,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 try:
     import fcntl
@@ -58,6 +61,85 @@ class ConnectivityCheck:
     url: str
     status: int
     body: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class NetworkSelection:
+    state: str
+    interface: str
+
+
+@dataclass(frozen=True)
+class InterfaceBinding:
+    interface: str
+    index: int
+    ipv4: str
+
+    def connect(self, address: tuple[str, int], timeout: float, _source: Any = None) -> socket.socket:
+        """Open a TCP socket through this interface, including on a multi-homed host."""
+        last_error = OSError("no address usable on the selected interface")
+        windows = platform.system() == "Windows"
+        for family, kind, protocol, _, target in socket.getaddrinfo(
+            *address, socket.AF_UNSPEC, socket.SOCK_STREAM
+        ):
+            sock = None
+            try:
+                sock = socket.socket(family, kind, protocol)
+                sock.settimeout(timeout)
+                if family == socket.AF_INET:
+                    # IP_UNICAST_IF takes an ifindex in network order on both platforms.
+                    option = getattr(socket, "IP_UNICAST_IF", 31 if windows else 50)
+                    sock.setsockopt(socket.IPPROTO_IP, option, struct.pack("!I", self.index))
+                    sock.bind((self.ipv4, 0))
+                elif family == socket.AF_INET6:
+                    option = getattr(socket, "IPV6_UNICAST_IF", 31 if windows else 76)
+                    index = struct.pack("=I" if windows else "!I", self.index)
+                    sock.setsockopt(socket.IPPROTO_IPV6, option, index)
+                else:
+                    raise OSError("unsupported address family")
+                if not windows:
+                    try:
+                        sock.setsockopt(
+                            socket.SOL_SOCKET, socket.SO_BINDTODEVICE, os.fsencode(self.interface) + b"\0"
+                        )
+                    except PermissionError:
+                        # Older kernels require CAP_NET_RAW for SO_BINDTODEVICE. In this
+                        # case only use a route the kernel would actually send on this NIC.
+                        route = [
+                            "ip", "-j", "-4" if family == socket.AF_INET else "-6", "route", "get", target[0]
+                        ]
+                        if family == socket.AF_INET:
+                            route.extend(["from", self.ipv4])
+                        try:
+                            routes = json.loads(run_command(route, timeout) or "[]")
+                        except ValueError:
+                            routes = []
+                        if not isinstance(routes, list) or not any(
+                            isinstance(item, dict) and item.get("dev") == self.interface for item in routes
+                        ):
+                            raise OSError(errno.ENETUNREACH, "route does not use the selected interface")
+                sock.connect(target)
+                return sock
+            except OSError as exc:
+                if sock is not None:
+                    sock.close()
+                last_error = exc
+        raise last_error
+
+
+class InterfaceHTTPHandler(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):
+    def __init__(self, binding: InterfaceBinding) -> None:
+        super().__init__(context=ssl.create_default_context())
+        self.binding = binding
+
+    def do_open(self, http_class: Any, req: urllib.request.Request, **kwargs: Any) -> Any:
+        def connection(host: str, **options: Any) -> http.client.HTTPConnection:
+            result = http_class(host, **options)
+            # Keep http.client's TLS validation and hostname handling around our TCP socket.
+            result._create_connection = self.binding.connect
+            return result
+
+        return super().do_open(connection, req, **kwargs)
 
 
 @dataclass(frozen=True)
@@ -289,6 +371,10 @@ def load_config(path: Path) -> Config:
         raise ValueError(f"config file not found: {path}") from exc
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"cannot read config: {exc}") from exc
+    return validate_config(data)
+
+
+def validate_config(data: Any) -> Config:
     if not isinstance(data, dict):
         raise ValueError("config root must be an object")
     data = old_config_to_current(data)
@@ -345,10 +431,12 @@ def load_config(path: Path) -> Config:
     )
 
 
-def build_opener(follow_redirects: bool = True) -> urllib.request.OpenerDirector:
+def build_opener(
+    follow_redirects: bool = True, *, binding: Optional[InterfaceBinding] = None
+) -> urllib.request.OpenerDirector:
     handlers: list[Any] = [
         urllib.request.ProxyHandler({}),
-        urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+        InterfaceHTTPHandler(binding) if binding else urllib.request.HTTPSHandler(context=ssl.create_default_context()),
     ]
     if not follow_redirects:
         handlers.append(NoRedirect())
@@ -372,7 +460,7 @@ def internet_online(opener: urllib.request.OpenerDirector, config: Config) -> bo
                         return True
         except urllib.error.HTTPError:
             continue
-        except (urllib.error.URLError, TimeoutError, OSError):
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException):
             continue
     if config.connectivity_policy == "all":
         return successes == len(config.connectivity_checks)
@@ -383,17 +471,22 @@ def internet_online(opener: urllib.request.OpenerDirector, config: Config) -> bo
 
 def run_command(command: list[str], timeout: int) -> Optional[str]:
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if platform.system() == "Windows" else 0
+    if command[0] == "powershell.exe" and "-Command" in command:
+        command = list(command)
+        script_index = command.index("-Command") + 1
+        command[script_index] = "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);" + command[script_index]
     try:
         result = subprocess.run(
             command,
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=timeout,
             env={**os.environ, "LC_ALL": "C.UTF-8"},
             creationflags=creation_flags,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, UnicodeError, subprocess.TimeoutExpired):
         return None
     return result.stdout.strip() if result.returncode == 0 else None
 
@@ -401,7 +494,7 @@ def run_command(command: list[str], timeout: int) -> Optional[str]:
 def linux_active_connection(interface: str, timeout: int) -> Optional[str]:
     if interface:
         return run_command(
-            ["nmcli", "-g", "GENERAL.CONNECTION", "device", "show", interface],
+            ["nmcli", "--escape", "no", "-g", "GENERAL.CONNECTION", "device", "show", interface],
             timeout,
         )
     output = run_command(
@@ -414,7 +507,7 @@ def linux_active_connection(interface: str, timeout: int) -> Optional[str]:
     return first.rsplit(":", 1)[0].replace("\\:", ":")
 
 
-def windows_connection_profiles(timeout: int) -> list[dict[str, str]]:
+def windows_connection_profiles(timeout: int) -> Optional[list[dict[str, str]]]:
     script = (
         "$ErrorActionPreference='Stop';"
         "@(Get-NetConnectionProfile | Where-Object {$_.IPv4Connectivity -ne 'Disconnected'} | "
@@ -423,33 +516,62 @@ def windows_connection_profiles(timeout: int) -> list[dict[str, str]]:
     output = run_command(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], timeout
     )
+    if output is None:
+        return None
     if not output:
         return []
     try:
         parsed = json.loads(output)
     except json.JSONDecodeError:
-        return []
+        return None
     if isinstance(parsed, dict):
         parsed = [parsed]
     if not isinstance(parsed, list):
-        return []
+        return None
     return [item for item in parsed if isinstance(item, dict)]
 
 
-def network_matches(config: Config) -> bool:
+def select_network(config: Config) -> NetworkSelection:
     system = platform.system()
     if system == "Linux":
-        active = linux_active_connection(config.interface, config.timeout)
-        return bool(active) and (config.network_name == "*" or active == config.network_name)
+        if config.interface:
+            active = linux_active_connection(config.interface, config.timeout)
+            if active is None:
+                return NetworkSelection("unknown", config.interface)
+            if active in ("", "--"):
+                return NetworkSelection("offline", config.interface)
+            matched = config.network_name in ("*", active)
+            return NetworkSelection("connected" if matched else "other", config.interface)
+        active_list = run_command(
+            ["nmcli", "-t", "-f", "NAME,DEVICE", "connection", "show", "--active"], config.timeout
+        )
+        if active_list is None:
+            return NetworkSelection("unknown", "")
+        for row in active_list.splitlines():
+            fields = re.fullmatch(r"((?:\\.|[^:\\])*):((?:\\.|[^:\\])+)", row)
+            if fields:
+                name, device = (re.sub(r"\\(.)", r"\1", field) for field in fields.groups())
+                if device not in ("--", "lo") and config.network_name in ("*", name):
+                    return NetworkSelection("connected", device)
+        return NetworkSelection("other" if active_list else "offline", "")
     if system == "Windows":
-        for profile in windows_connection_profiles(config.timeout):
+        profiles = windows_connection_profiles(config.timeout)
+        if profiles is None:
+            return NetworkSelection("unknown", config.interface)
+        state = "offline"
+        for profile in profiles:
             name = str(profile.get("Name", ""))
             interface = str(profile.get("InterfaceAlias", ""))
-            name_matches = config.network_name == "*" or name == config.network_name
-            if name_matches and (not config.interface or interface == config.interface):
-                return True
-        return False
-    return False
+            if interface and (not config.interface or interface == config.interface):
+                if name and config.network_name in ("*", name):
+                    return NetworkSelection("connected", interface)
+                state = "other"
+        return NetworkSelection(state, config.interface)
+    return NetworkSelection("unknown", config.interface)
+
+
+def network_matches(config: Config) -> bool:
+    return select_network(config).state == "connected"
 
 
 def recover_linux_network(config: Config, backend: Optional[LinuxNetworkBackend] = None) -> bool:
@@ -467,16 +589,28 @@ def recover_linux_network(config: Config, backend: Optional[LinuxNetworkBackend]
         return False
 
     active_connection = network.active_connection(config.interface, config.timeout)
+    if active_connection is None or (
+        active_connection not in ("", "--") and config.network_name not in ("*", active_connection)
+    ):
+        log("network recovery skipped: the interface is unavailable or running another profile")
+        return False
     connection = active_connection if config.network_name == "*" else config.network_name
     if not connection or connection == "--":
         log("network recovery skipped: the selected connection could not be identified")
         return False
 
+    active_path = None
     if active_connection == connection:
         connection_uuid = network.command(
             ["nmcli", "-g", "GENERAL.CON-UUID", "device", "show", config.interface],
             config.timeout,
         )
+        active_path = network.command(
+            ["nmcli", "-g", "GENERAL.CON-PATH", "device", "show", config.interface],
+            config.timeout,
+        )
+        if not active_path or not active_path.startswith("/org/freedesktop/NetworkManager/ActiveConnection/"):
+            return False
     else:
         connection_uuid = network.command(
             ["nmcli", "-g", "connection.uuid", "connection", "show", connection],
@@ -492,11 +626,24 @@ def recover_linux_network(config: Config, backend: Optional[LinuxNetworkBackend]
     )
     network.command(["resolvectl", "flush-caches"], config.timeout)
     network.command(["resolvectl", "reset-server-features"], config.timeout)
-    network.command(
-        ["nmcli", "connection", "down", "uuid", connection_uuid],
-        max(config.timeout, 15),
-    )
-    network.pause(2)
+    if active_path:
+        if network.active_connection(config.interface, config.timeout) != connection:
+            return False
+        network.command(
+            ["nmcli", "connection", "down", "apath", active_path],
+            max(config.timeout, 15),
+        )
+        network.pause(2)
+    active_now = network.active_connection(config.interface, config.timeout)
+    if active_now is None or active_now not in ("", "--", connection):
+        return False
+    if active_now in ("", "--"):
+        device_state = network.command(
+            ["nmcli", "-g", "GENERAL.STATE", "device", "show", config.interface], config.timeout
+        )
+        # 30 is NM_DEVICE_STATE_DISCONNECTED. Do not interrupt an activation in progress.
+        if not device_state or device_state.split()[0] != "30":
+            return False
     result = network.command(
         [
             "nmcli",
@@ -535,35 +682,52 @@ def linux_ipv4(interface: str) -> Optional[str]:
         return None
 
 
-def routed_ipv4() -> Optional[str]:
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.connect(("192.0.2.1", 80))
-            address = sock.getsockname()[0]
-            return address if address and not address.startswith("127.") else None
-    except OSError:
+def interface_binding(interface: str, timeout: int) -> Optional[InterfaceBinding]:
+    if not interface:
         return None
+    system = platform.system()
+    if system == "Linux":
+        address = linux_ipv4(interface)
+        try:
+            index = socket.if_nametoindex(interface)
+        except OSError:
+            return None
+    elif system == "Windows":
+        escaped = interface.replace("'", "''")
+        script = (
+            "Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object {"
+            f"$_.InterfaceAlias -eq '{escaped}' -and $_.AddressState -eq 'Preferred' "
+            "-and $_.IPAddress -notlike '169.254.*' -and -not $_.SkipAsSource} | "
+            "Select-Object -First 1 IPAddress,InterfaceIndex | ConvertTo-Json -Compress"
+        )
+        output = run_command(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            timeout,
+        )
+        if not output:
+            return None
+        try:
+            details = json.loads(output)
+            address, index = details["IPAddress"], details["InterfaceIndex"]
+        except (ValueError, KeyError, TypeError):
+            return None
+    else:
+        return None
+    if not isinstance(address, str) or type(index) is not int or index <= 0:
+        return None
+    try:
+        ipv4 = ipaddress.IPv4Address(address)
+    except ValueError:
+        return None
+    if ipv4.is_unspecified or ipv4.is_loopback or ipv4.is_link_local:
+        return None
+    return InterfaceBinding(interface, index, str(ipv4))
 
 
 def get_ipv4(config: Config) -> Optional[str]:
-    if platform.system() == "Linux":
-        address = linux_ipv4(config.interface)
-        if address:
-            return address
-    if platform.system() == "Windows" and config.interface:
-        escaped = config.interface.replace("'", "''")
-        script = (
-            f"@(Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias '{escaped}' "
-            "-ErrorAction SilentlyContinue | Where-Object {$_.IPAddress -notlike '169.254.*'} | "
-            "Select-Object -First 1 -ExpandProperty IPAddress)"
-        )
-        address = run_command(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-            config.timeout,
-        )
-        if address:
-            return address.splitlines()[0].strip()
-    return routed_ipv4()
+    interface = config.interface or select_network(config).interface
+    binding = interface_binding(interface, config.timeout)
+    return binding.ipv4 if binding else None
 
 
 def get_ipv6(interface: str) -> str:
@@ -600,20 +764,6 @@ def parse_jsonp(text: str) -> Optional[dict[str, Any]]:
     except json.JSONDecodeError:
         return None
     return value if isinstance(value, dict) else None
-
-
-def safe_response(text: str, config: Config) -> str:
-    cleaned = text
-    secrets = (
-        config.password,
-        urllib.parse.quote(config.password, safe=""),
-        base64.b64encode(config.password.encode("utf-8")).decode("ascii"),
-        config.username,
-    )
-    for secret in secrets:
-        if secret:
-            cleaned = cleaned.replace(secret, "<redacted>")
-    return re.sub(r"[\r\n\t]+", " ", cleaned)[:300]
 
 
 def request_text(
@@ -684,7 +834,7 @@ def drcom_login(
     if isinstance(overrides, dict):
         params.update(render_templates(overrides, template_values(config, ipv4, ipv6)))
     try:
-        _status, body = request_text(
+        status, body = request_text(
             opener,
             portal["login_url"],
             "GET",
@@ -699,7 +849,7 @@ def drcom_login(
         else:
             log(f"portal request failed: {type(reason).__name__}")
         return False
-    except (TimeoutError, OSError, ValueError) as exc:
+    except (TimeoutError, OSError, ValueError, http.client.HTTPException) as exc:
         log(f"portal request failed: {type(exc).__name__}")
         return False
 
@@ -723,7 +873,7 @@ def drcom_login(
         ):
             log(f"Dr.COM reports this computer is already online (ip={ipv4})")
             return True
-    log(f"Dr.COM login rejected; response={safe_response(body, config)}")
+    log(f"Dr.COM login rejected (HTTP {status})")
     return False
 
 
@@ -778,7 +928,7 @@ def srun_login(opener: urllib.request.OpenerDirector, config: Config, ipv4: str)
     challenge_url = str(portal.get("challenge_url", f"{base_url}/cgi-bin/get_challenge"))
     login_url = str(portal.get("login_url", f"{base_url}/cgi-bin/srun_portal"))
     try:
-        _status, challenge_body = request_text(
+        status, challenge_body = request_text(
             opener,
             challenge_url,
             "GET",
@@ -789,7 +939,7 @@ def srun_login(opener: urllib.request.OpenerDirector, config: Config, ipv4: str)
         challenge = parse_jsonp(challenge_body)
         token = str(challenge.get("challenge", "")) if challenge else ""
         if not re.fullmatch(r"[A-Za-z0-9]+", token):
-            log(f"SRUN challenge failed; response={safe_response(challenge_body, config)}")
+            log(f"SRUN challenge failed (HTTP {status})")
             return False
 
         hmd5 = hmac.new(token.encode("utf-8"), config.password.encode("utf-8"), hashlib.md5).hexdigest()
@@ -823,7 +973,7 @@ def srun_login(opener: urllib.request.OpenerDirector, config: Config, ipv4: str)
             "n": n_value,
             "type": type_value,
         }
-        _status, body = request_text(
+        status, body = request_text(
             opener,
             login_url,
             "GET",
@@ -834,7 +984,7 @@ def srun_login(opener: urllib.request.OpenerDirector, config: Config, ipv4: str)
     except urllib.error.URLError as exc:
         log(f"SRUN portal request failed: {type(getattr(exc, 'reason', exc)).__name__}")
         return False
-    except (TimeoutError, OSError, ValueError) as exc:
+    except (TimeoutError, OSError, ValueError, http.client.HTTPException) as exc:
         log(f"SRUN portal request failed: {type(exc).__name__}")
         return False
 
@@ -858,7 +1008,7 @@ def srun_login(opener: urllib.request.OpenerDirector, config: Config, ipv4: str)
         ):
             log(f"SRUN reports this account is already online (ip={ipv4})")
             return True
-    log(f"SRUN login rejected; response={safe_response(body, config)}")
+    log(f"SRUN login rejected (HTTP {status})")
     return False
 
 
@@ -882,7 +1032,7 @@ def generic_login(
     except urllib.error.URLError as exc:
         log(f"generic portal request failed: {type(getattr(exc, 'reason', exc)).__name__}")
         return False
-    except (TimeoutError, OSError, ValueError) as exc:
+    except (TimeoutError, OSError, ValueError, http.client.HTTPException) as exc:
         log(f"generic portal request failed: {type(exc).__name__}")
         return False
 
@@ -897,7 +1047,7 @@ def generic_login(
     if any(marker in body for marker in already_markers):
         log(f"generic portal reports this computer is already online (ip={ipv4})")
         return True
-    log(f"generic portal login rejected; response={safe_response(body, config)}")
+    log(f"generic portal login rejected (HTTP {status})")
     return False
 
 
@@ -921,9 +1071,11 @@ def interruptible_sleep(seconds: int) -> None:
         time.sleep(min(remaining, 1.0))
 
 
-def run(config: Config, once: bool = False) -> int:
-    connectivity_opener = build_opener(follow_redirects=False)
-    portal_opener = build_opener(follow_redirects=True)
+def run(
+    config: Config, once: bool = False,
+    report_status: Optional[Callable[[str, str, str], None]] = None,
+) -> int:
+    previous_binding = None
     consecutive_failures = 0
     login_backoff = config.offline_interval
     last_state = ""
@@ -940,24 +1092,32 @@ def run(config: Config, once: bool = False) -> int:
         log("warning: this campus portal uses HTTP, so the password is not encrypted in transit")
 
     while RUNNING:
-        if not network_matches(config):
+        selection = select_network(config)
+        if selection.state != "connected":
+            if report_status:
+                report_status(selection.state, "unknown", selection.interface)
             state = f"waiting for network {config.network_name}"
             if state != last_state:
                 log(state)
                 last_state = state
             consecutive_failures = 0
+            previous_binding = None
             if once:
                 return 2
-            if network_recovery_enabled and network_recovery.observe_offline(
-                time.monotonic()
-            ):
+            if selection.state != "offline":
+                network_recovery.observe_online()
+                login_backoff = config.offline_interval
+            elif network_recovery_enabled and network_recovery.observe_offline(time.monotonic()):
                 recover_linux_network(config)
             interruptible_sleep(config.offline_interval)
             continue
 
-        ipv4 = get_ipv4(config)
-        if not ipv4:
-            state = f"waiting for IPv4 address on {config.interface or 'active interface'}"
+        binding = interface_binding(selection.interface, config.timeout)
+        if binding is None:
+            if report_status:
+                report_status("connected", "unknown", selection.interface)
+            previous_binding = None
+            state = f"waiting for IPv4 address on {selection.interface}"
             if state != last_state:
                 log(state)
                 last_state = state
@@ -971,7 +1131,14 @@ def run(config: Config, once: bool = False) -> int:
             interruptible_sleep(config.offline_interval)
             continue
 
-        if internet_online(connectivity_opener, config):
+        if binding != previous_binding:
+            connectivity_opener = build_opener(follow_redirects=False, binding=binding)
+            portal_opener = build_opener(follow_redirects=True, binding=binding)
+            previous_binding = binding
+        online = internet_online(connectivity_opener, config)
+        if report_status:
+            report_status("connected", "online" if online else "offline", selection.interface)
+        if online:
             if last_state != "online":
                 log("internet is online")
                 last_state = "online"
@@ -1005,7 +1172,15 @@ def run(config: Config, once: bool = False) -> int:
 
         log("internet check failed; trying portal login")
         last_state = "authenticating"
-        success = portal_login(portal_opener, config, ipv4, get_ipv6(config.interface))
+        # A probe or recovery can take seconds; confirm the same profile before sending credentials.
+        confirmed = select_network(config)
+        if confirmed != selection:
+            if report_status:
+                report_status(confirmed.state, "unknown", confirmed.interface)
+            if once:
+                return 2
+            continue
+        success = portal_login(portal_opener, config, binding.ipv4, get_ipv6(selection.interface))
         consecutive_failures = 0
         if success:
             login_backoff = config.offline_interval
@@ -1034,9 +1209,13 @@ def diagnose(config: Config) -> int:
     print(f"python={platform.python_version()}")
     print(f"network={config.network_name} interface={config.interface or 'auto'}")
     print(f"portal={config.portal['type']} connectivity_policy={config.connectivity_policy}")
-    print(f"ipv4={get_ipv4(config) or 'unavailable'}")
-    print(f"network_matches={network_matches(config)}")
-    print(f"internet_online={internet_online(build_opener(follow_redirects=False), config)}")
+    selection = select_network(config)
+    matched = selection.state == "connected"
+    binding = interface_binding(selection.interface, config.timeout) if matched else None
+    print(f"ipv4={binding.ipv4 if binding else 'unavailable'}")
+    print(f"network_matches={matched}")
+    online = internet_online(build_opener(follow_redirects=False, binding=binding), config) if binding else "unknown"
+    print(f"internet_online={online}")
     if platform.system() == "Linux":
         print(f"nmcli={bool(run_command(['nmcli', '--version'], config.timeout))}")
     return 0

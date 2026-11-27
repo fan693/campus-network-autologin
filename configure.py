@@ -9,6 +9,7 @@ import os
 import platform
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
@@ -95,7 +96,8 @@ def load_existing(path: Optional[Path]) -> dict[str, Any]:
 def choose_portal(existing: dict[str, Any]) -> dict[str, Any]:
     current = existing.get("portal", {}) if isinstance(existing.get("portal"), dict) else {}
     current_type = current.get("type", "")
-    if "login.cqu.edu.cn" in str(current.get("login_url", "")):
+    cqu_url = "https://login.cqu.edu.cn:802/eportal/portal/login"
+    if current_type == "drcom" and current.get("login_url") == cqu_url:
         default_choice = "1"
     else:
         default_choice = {"drcom": "2", "srun": "3", "generic": "4"}.get(current_type, "1")
@@ -111,53 +113,61 @@ def choose_portal(existing: dict[str, Any]) -> dict[str, Any]:
             break
         print("请输入 1、2、3 或 4。")
 
+    # Keep site-specific fields when editing a profile for the same portal.
+    previous = current if choice == default_choice else {}
     if choice == "1":
         return {
+            **previous,
             "type": "drcom",
-            "login_url": "https://login.cqu.edu.cn:802/eportal/portal/login",
-            "account_prefix": ",0,",
+            "login_url": cqu_url,
+            "account_prefix": previous.get("account_prefix", ",0,"),
         }
     if choice == "2":
+        prefix = previous.get("account_prefix", ",0,")
+        url = ask(
+            "登录 API 地址（通常以 /eportal/portal/login 结尾）",
+            str(previous.get("login_url", "")),
+        )
+        prefix = ask(
+            "账号字段前缀（多数 Dr.COM 为 ,0,；没有则输入 -）", str(prefix) if prefix else "-"
+        )
         return {
+            **previous,
             "type": "drcom",
-            "login_url": ask(
-                "登录 API 地址（通常以 /eportal/portal/login 结尾）",
-                str(current.get("login_url", "")),
-            ),
-            "account_prefix": ask(
-                "账号字段前缀（多数 Dr.COM 为 ,0,；没有则输入 -）",
-                str(current.get("account_prefix", ",0,")),
-            ).replace("-", "", 1),
+            "login_url": url,
+            "account_prefix": "" if prefix == "-" else prefix,
         }
     if choice == "3":
         print("提示：base URL 示例为 http://10.0.0.55，不要包含 /cgi-bin/get_challenge。")
         return {
+            **previous,
             "type": "srun",
-            "base_url": ask("SRUN 认证服务器 base URL", str(current.get("base_url", ""))),
-            "ac_id": ask("AC ID", str(current.get("ac_id", "1"))),
-            "n": ask("n 参数", str(current.get("n", "200"))),
-            "type_value": ask("type 参数", str(current.get("type_value", "1"))),
-            "enc_ver": ask("enc_ver 参数", str(current.get("enc_ver", "srun_bx1"))),
+            "base_url": ask("SRUN 认证服务器 base URL", str(previous.get("base_url", ""))),
+            "ac_id": ask("AC ID", str(previous.get("ac_id", "1"))),
+            "n": ask("n 参数", str(previous.get("n", "200"))),
+            "type_value": ask("type 参数", str(previous.get("type_value", "1"))),
+            "enc_ver": ask("enc_ver 参数", str(previous.get("enc_ver", "srun_bx1"))),
             "base64_alphabet": ask(
                 "SRUN Base64 字母表",
-                str(current.get("base64_alphabet", campus_autologin.SRUN_ALPHABET)),
+                str(previous.get("base64_alphabet", campus_autologin.SRUN_ALPHABET)),
             ),
         }
 
-    default_parameters = current.get(
+    default_parameters = previous.get(
         "parameters", {"username": "{username}", "password": "{password}", "user_ip": "{ipv4}"}
     )
-    default_success = current.get("success_contains", ["success"])
+    default_success = previous.get("success_contains", ["success"])
     print("可用占位符：{username} {password} {password_base64} {ipv4} {ipv6} {network_name} {timestamp}")
     return {
+        **previous,
         "type": "generic",
-        "login_url": ask("登录请求 URL", str(current.get("login_url", ""))),
-        "method": ask("请求方法 GET/POST", str(current.get("method", "POST"))).upper(),
+        "login_url": ask("登录请求 URL", str(previous.get("login_url", ""))),
+        "method": ask("请求方法 GET/POST", str(previous.get("method", "POST"))).upper(),
         "parameters": ask_json("请求参数 JSON 对象", default_parameters),
-        "headers": ask_json("额外请求头 JSON 对象", current.get("headers", {})),
+        "headers": ask_json("额外请求头 JSON 对象", previous.get("headers", {})),
         "success_contains": ask_json("成功响应中至少出现一个字符串", default_success),
         "already_online_contains": ask_json(
-            "已在线响应中至少出现一个字符串", current.get("already_online_contains", [])
+            "已在线响应中至少出现一个字符串", previous.get("already_online_contains", [])
         ),
     }
 
@@ -213,13 +223,19 @@ def build_config(args: argparse.Namespace, existing: dict[str, Any]) -> dict[str
 
 def write_config(path: Path, config: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(
-        json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-    if os.name != "nt":
-        os.chmod(temporary, 0o600)
-    temporary.replace(path)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(config, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
 
 
 def parse_args() -> argparse.Namespace:
@@ -236,18 +252,11 @@ def main() -> int:
     args = parse_args()
     existing = load_existing(args.existing)
     config = build_config(args, existing)
-    temporary_validation = args.output.with_name(args.output.name + ".validate")
     try:
-        write_config(temporary_validation, config)
-        campus_autologin.load_config(temporary_validation)
+        campus_autologin.validate_config(config)
     except ValueError as exc:
         print(f"配置无效：{exc}", file=sys.stderr)
         return 78
-    finally:
-        try:
-            temporary_validation.unlink()
-        except FileNotFoundError:
-            pass
     write_config(args.output, config)
     print(f"配置已写入：{args.output}")
     return 0
