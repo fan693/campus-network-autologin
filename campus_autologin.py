@@ -205,6 +205,37 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class PortalRedirect(urllib.request.HTTPRedirectHandler):
+    @staticmethod
+    def origin(url: str) -> tuple[str, str, int]:
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.hostname or parts.username is not None:
+            raise ValueError("invalid portal redirect")
+        port = parts.port
+        return parts.scheme, parts.hostname, port if port is not None else (443 if parts.scheme == "https" else 80)
+
+    def redirect_request(
+        self, req: urllib.request.Request, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> Optional[urllib.request.Request]:
+        try:
+            source = self.origin(req.full_url)
+            destination = self.origin(newurl)
+        except ValueError:
+            return None
+        if source[0] == "https" and destination[0] != "https":
+            return None
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None and source != destination:
+            if redirected.data is not None:
+                return None
+            # Users can template any portal header, including normally public ones.
+            # A different origin only receives application-defined, constant values.
+            redirected.headers.clear()
+            redirected.add_header("User-Agent", USER_AGENT)
+            redirected.add_header("Accept", "*/*")
+        return redirected
+
+
 def log(message: str) -> None:
     line = f"{APP_NAME}: {message}"
     try:
@@ -438,8 +469,7 @@ def build_opener(
         urllib.request.ProxyHandler({}),
         InterfaceHTTPHandler(binding) if binding else urllib.request.HTTPSHandler(context=ssl.create_default_context()),
     ]
-    if not follow_redirects:
-        handlers.append(NoRedirect())
+    handlers.append(PortalRedirect() if follow_redirects else NoRedirect())
     return urllib.request.build_opener(*handlers)
 
 
