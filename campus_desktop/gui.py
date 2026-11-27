@@ -145,6 +145,41 @@ def linux_target_status(status: "DesktopStatus", snapshot: Path = Path("/run/cam
         return
 
 
+def tail_log(path: Path) -> list[str]:
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            offset = max(0, stream.tell() - 8192)
+            stream.seek(offset)
+            if offset:
+                stream.readline()
+            return stream.read(8192).decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+
+
+def displayed_log_lines(campus: list[str], remote: list[str]) -> tuple[str, ...]:
+    messages = {
+        "internet is online": "公网可用",
+        "waiting for network": "正在等待目标校园网",
+        "reconnect request completed": "已提交网络重连请求",
+        "trying portal login": "正在进行门户认证",
+        "internet recovered": "公网连接已恢复",
+        "internet is offline": "公网离线",
+        "monitor started": "远程维护已启动",
+    }
+    entries: list[str] = []
+    for lines, limit in ((campus, 3), (remote, 5)):
+        for line in reversed(lines):
+            found = next((text for marker, text in messages.items() if marker in line.casefold()), None)
+            if found is not None:
+                stamp = re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", line)
+                entries.append(f"{stamp.group(0)}  {found}" if stamp else found)
+            if len(entries) >= limit:
+                break
+    return tuple(entries)
+
+
 REMOTE_REASON_LABELS = {
     "center authentication and socket are online": "中心认证与实时连接正常",
     "center authentication or socket is offline": "中心认证或实时连接已经离线",
@@ -267,57 +302,18 @@ class StatusWorker(QThread):
             status.remote_detail = "深度健康模块不可用"
 
         if platform.system() == "Windows":
-            self.completed.emit(status)
-            return
-        logs: list[str] = []
-        service_name = status.campus_service_name
-        remote_name = status.remote_service_name
-        if service_name:
-            output = run_command(
-                ["journalctl", "-u", service_name, "-n", "12", "--no-pager", "-o", "cat"],
-                5,
-            )
-            for line in reversed(output.splitlines()):
-                normalized = line.strip()
-                if not normalized:
-                    continue
-                if any(
-                    marker in normalized.casefold()
-                    for marker in (
-                        "internet is online",
-                        "waiting for network",
-                        "reconnect request completed",
-                        "trying portal login",
-                    )
-                ):
-                    logs.append(normalized[:180])
-                if len(logs) >= 3:
-                    break
-        if remote_name:
-            output = run_command(
-                [
-                    "journalctl",
-                    "--user",
-                    "-u",
-                    remote_name,
-                    "-n",
-                    "12",
-                    "--no-pager",
-                    "-o",
-                    "cat",
-                ],
-                5,
-            )
-            for line in reversed(output.splitlines()):
-                normalized = line.strip()
-                if any(
-                    marker in normalized.casefold()
-                    for marker in ("internet", "reconnect", "recovered", "started")
-                ):
-                    logs.append(normalized[:180])
-                if len(logs) >= 5:
-                    break
-        status.log_lines = tuple(logs)
+            config_dir = Path(os.environ.get("APPDATA", str(Path.home()))) / "CampusAutoLogin"
+            campus_lines = tail_log(config_dir / "campus-autologin.log")
+            remote_lines = tail_log(config_dir / "remote-recovery.log")
+        else:
+            def journal(name: str, *, user: bool = False) -> list[str]:
+                if not name:
+                    return []
+                prefix = ["journalctl", "--user"] if user else ["journalctl"]
+                return run_command([*prefix, "-u", name, "-n", "12", "--no-pager", "-o", "cat"], 5).splitlines()
+            campus_lines = journal(status.campus_service_name)
+            remote_lines = journal(status.remote_service_name, user=True)
+        status.log_lines = displayed_log_lines(campus_lines, remote_lines)
         self.completed.emit(status)
 
 
@@ -1564,6 +1560,11 @@ def run_gui(version: Version) -> int:
             return 0
         QMessageBox.warning(None, "无法启动", "无法访问当前用户的程序锁，请检查运行目录权限。")
         return 2
+    if platform.system() == "Windows":
+        from . import windows
+        ok, code = windows.recover_on_startup()
+        if not ok:
+            QMessageBox.warning(None, "恢复上次操作失败", control_error_message(code))
     app.setFont(QFont("Noto Sans CJK SC", 10))
     window = MainWindow(version)
     if window.tray is not None:

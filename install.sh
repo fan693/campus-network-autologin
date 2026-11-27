@@ -171,6 +171,19 @@ install_network_policy() {
   done
 }
 
+install_desktop() {
+  local prefix="$1"
+  install -d -m 0755 "${PROGRAM_DIR}/campus_desktop" "${PROGRAM_DIR}/assets" \
+    "${prefix}/bin" "${prefix}/share/applications" "${prefix}/share/icons/hicolor/scalable/apps"
+  install -m 0644 "${SCRIPT_DIR}"/campus_desktop/*.py "${PROGRAM_DIR}/campus_desktop/"
+  install -m 0644 "${SCRIPT_DIR}/VERSION" "${PROGRAM_DIR}/VERSION"
+  install -m 0644 "${SCRIPT_DIR}/assets/campus-network-assistant.svg" "${PROGRAM_DIR}/assets/"
+  install -m 0755 "${SCRIPT_DIR}/desktop_launcher.py" "${PROGRAM_DIR}/desktop_launcher.py"
+  ln -sfnT "${PROGRAM_DIR}/desktop_launcher.py" "${prefix}/bin/campus-network-assistant"
+  install -m 0644 "${SCRIPT_DIR}/packaging/linux/campus-network-assistant.desktop" "${prefix}/share/applications"/
+  install -m 0644 "${SCRIPT_DIR}/assets/campus-network-assistant.svg" "${prefix}/share/icons/hicolor/scalable/apps"/
+}
+
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then return 0; fi
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -277,15 +290,7 @@ install -o root -g root -m 0755 "${SCRIPT_DIR}/remote_recovery.py" \
   "${PROGRAM_DIR}/remote_recovery.py"
 install -o root -g root -m 0755 "${SCRIPT_DIR}/campus_control.py" \
   "${PROGRAM_DIR}/campus_control.py"
-install -d -m 0755 "${PROGRAM_DIR}/campus_desktop" "${PROGRAM_DIR}/assets" \
-  /usr/local/bin /usr/local/share/applications /usr/local/share/icons/hicolor/scalable/apps
-install -m 0644 "${SCRIPT_DIR}"/campus_desktop/*.py "${PROGRAM_DIR}/campus_desktop/"
-install -m 0644 "${SCRIPT_DIR}/VERSION" "${PROGRAM_DIR}/VERSION"
-install -m 0644 "${SCRIPT_DIR}/assets/campus-network-assistant.svg" "${PROGRAM_DIR}/assets/"
-install -m 0755 "${SCRIPT_DIR}/desktop_launcher.py" "${PROGRAM_DIR}/desktop_launcher.py"
-ln -sfn "${PROGRAM_DIR}/desktop_launcher.py" /usr/local/bin/campus-network-assistant
-install -m 0644 "${SCRIPT_DIR}/packaging/linux/campus-network-assistant.desktop" /usr/local/share/applications/
-install -m 0644 "${SCRIPT_DIR}/assets/campus-network-assistant.svg" /usr/local/share/icons/hicolor/scalable/apps/
+install_desktop /usr/local
 install -o root -g root -m 0644 "${SCRIPT_DIR}/${REMOTE_SERVICE_NAME}" \
   "${PROGRAM_DIR}/${REMOTE_SERVICE_NAME}"
 install -o root -g root -m 0644 "${SCRIPT_DIR}/campus-autologin.service" \

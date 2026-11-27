@@ -15,14 +15,19 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+      - if: matrix.python-version == '3.12'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0
+          python -m pip install PyQt5
       - run: python -m unittest discover -s tests -v
-      - run: python -m py_compile campus_autologin.py configure.py remote_recovery.py select_network.py
+      - run: python -m compileall -q campus_autologin.py campus_control.py configure.py desktop_launcher.py remote_recovery.py select_network.py campus_desktop
 
   shell:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - run: bash -n install.sh configure.sh uninstall.sh
+      - run: for script in install.sh configure.sh uninstall.sh; do bash -n "$script" || exit 1; done
       - run: shellcheck install.sh configure.sh uninstall.sh
       - run: git diff --check
 
@@ -35,6 +40,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - run: python -m pip install PyQt5
       - run: python -m unittest discover -s tests -v
       - shell: pwsh
         run: |
