@@ -16,6 +16,7 @@
   "offline_interval": 10,
   "timeout": 5,
   "failure_threshold": 2,
+  "connectivity_policy": "any",
   "connectivity_checks": [
     {"url": "https://www.gstatic.com/generate_204", "status": 204}
   ]

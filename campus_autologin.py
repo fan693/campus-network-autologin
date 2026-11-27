@@ -32,6 +32,7 @@ except ImportError:  # Windows
 
 
 APP_NAME = "campus-autologin"
+CONFIG_VERSION = 4
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -48,6 +49,8 @@ SRUN_ALPHABET = "LVoJPiCN2R8G90yg+hmFHuacZ1OWMnrsSTXkYpUq/3dlbfKwv6xztjI7DeBE45Q
 SIOCGIFADDR = 0x8915
 RUNNING = True
 LOG_FILE: Optional[Path] = None
+LOG_MAX_BYTES = 2 * 1024 * 1024
+LOG_BACKUPS = 3
 
 
 @dataclass(frozen=True)
@@ -71,6 +74,7 @@ class Config:
     network_recovery_after: int
     network_recovery_cooldown: int
     connectivity_checks: tuple[ConnectivityCheck, ...]
+    connectivity_policy: str = "any"
 
 
 @dataclass
@@ -93,6 +97,17 @@ class NetworkRecoveryState:
             return False
         self.last_attempt = now
         return True
+
+
+class LinuxNetworkBackend:
+    def command(self, command: list[str], timeout: int) -> Optional[str]:
+        return run_command(command, timeout)
+
+    def active_connection(self, interface: str, timeout: int) -> Optional[str]:
+        return linux_active_connection(interface, timeout)
+
+    def pause(self, seconds: int) -> None:
+        interruptible_sleep(seconds)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -119,6 +134,15 @@ def log(message: str) -> None:
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
         try:
             LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            if LOG_FILE.exists() and LOG_FILE.stat().st_size >= LOG_MAX_BYTES:
+                for index in range(LOG_BACKUPS - 1, 0, -1):
+                    source = LOG_FILE.with_name(f"{LOG_FILE.name}.{index}")
+                    target = LOG_FILE.with_name(f"{LOG_FILE.name}.{index + 1}")
+                    if source.exists():
+                        target.unlink(missing_ok=True)
+                        source.replace(target)
+                LOG_FILE.with_name(f"{LOG_FILE.name}.1").unlink(missing_ok=True)
+                LOG_FILE.replace(LOG_FILE.with_name(f"{LOG_FILE.name}.1"))
             with LOG_FILE.open("a", encoding="utf-8") as output:
                 output.write(f"{timestamp} {line}\n")
         except OSError:
@@ -166,7 +190,7 @@ def old_config_to_current(data: dict[str, Any]) -> dict[str, Any]:
     if "portal" in data or "student_id" not in data:
         return data
     return {
-        "version": 4,
+        "version": CONFIG_VERSION,
         "username": data.get("student_id", ""),
         "password": data.get("password", ""),
         "network_name": data.get("connection_name", ""),
@@ -183,6 +207,7 @@ def old_config_to_current(data: dict[str, Any]) -> dict[str, Any]:
         "network_recovery_after": data.get("network_recovery_after", 300),
         "network_recovery_cooldown": data.get("network_recovery_cooldown", 900),
         "connectivity_checks": list(DEFAULT_CHECKS),
+        "connectivity_policy": "any",
     }
 
 
@@ -267,6 +292,11 @@ def load_config(path: Path) -> Config:
     if not isinstance(data, dict):
         raise ValueError("config root must be an object")
     data = old_config_to_current(data)
+    version = data.get("version", CONFIG_VERSION)
+    if not isinstance(version, int) or isinstance(version, bool):
+        raise ValueError("version must be an integer")
+    if version != CONFIG_VERSION:
+        raise ValueError(f"unsupported config version: {version}")
 
     username = validate_text(data.get("username", ""), "username")
     password = validate_text(data.get("password", ""), "password")
@@ -290,6 +320,10 @@ def load_config(path: Path) -> Config:
             raise ValueError(f"connectivity_checks[{index}].body must be a string")
         checks.append(ConnectivityCheck(url=url, status=status, body=body))
 
+    policy = validate_text(data.get("connectivity_policy", "any"), "connectivity_policy").lower()
+    if policy not in ("any", "all", "quorum"):
+        raise ValueError("connectivity_policy must be any, all, or quorum")
+
     return Config(
         username=username,
         password=password,
@@ -307,6 +341,7 @@ def load_config(path: Path) -> Config:
             data, "network_recovery_cooldown", 900, 60, 86400
         ),
         connectivity_checks=tuple(checks),
+        connectivity_policy=policy,
     )
 
 
@@ -321,6 +356,7 @@ def build_opener(follow_redirects: bool = True) -> urllib.request.OpenerDirector
 
 
 def internet_online(opener: urllib.request.OpenerDirector, config: Config) -> bool:
+    successes = 0
     for check in config.connectivity_checks:
         request = urllib.request.Request(
             check.url,
@@ -331,12 +367,18 @@ def internet_online(opener: urllib.request.OpenerDirector, config: Config) -> bo
             with opener.open(request, timeout=config.timeout) as response:
                 body = response.read(512).decode("utf-8", errors="replace")
                 if response.status == check.status and (check.body is None or body.strip() == check.body):
-                    return True
+                    successes += 1
+                    if config.connectivity_policy == "any":
+                        return True
         except urllib.error.HTTPError:
             continue
         except (urllib.error.URLError, TimeoutError, OSError):
             continue
-    return False
+    if config.connectivity_policy == "all":
+        return successes == len(config.connectivity_checks)
+    if config.connectivity_policy == "quorum":
+        return successes >= len(config.connectivity_checks) // 2 + 1
+    return successes > 0
 
 
 def run_command(command: list[str], timeout: int) -> Optional[str]:
@@ -410,11 +452,13 @@ def network_matches(config: Config) -> bool:
     return False
 
 
-def recover_linux_network(config: Config) -> bool:
+def recover_linux_network(config: Config, backend: Optional[LinuxNetworkBackend] = None) -> bool:
     if platform.system() != "Linux" or not config.interface:
         return False
 
-    network_type = run_command(
+    network = backend or LinuxNetworkBackend()
+
+    network_type = network.command(
         ["nmcli", "-g", "GENERAL.TYPE", "device", "show", config.interface],
         config.timeout,
     )
@@ -422,19 +466,19 @@ def recover_linux_network(config: Config) -> bool:
         log(f"network recovery skipped: {config.interface} is not Ethernet or Wi-Fi")
         return False
 
-    active_connection = linux_active_connection(config.interface, config.timeout)
+    active_connection = network.active_connection(config.interface, config.timeout)
     connection = active_connection if config.network_name == "*" else config.network_name
     if not connection or connection == "--":
         log("network recovery skipped: the selected connection could not be identified")
         return False
 
     if active_connection == connection:
-        connection_uuid = run_command(
+        connection_uuid = network.command(
             ["nmcli", "-g", "GENERAL.CON-UUID", "device", "show", config.interface],
             config.timeout,
         )
     else:
-        connection_uuid = run_command(
+        connection_uuid = network.command(
             ["nmcli", "-g", "connection.uuid", "connection", "show", connection],
             config.timeout,
         )
@@ -446,14 +490,14 @@ def recover_linux_network(config: Config) -> bool:
         f"refreshing DNS and reconnecting {connection} on {config.interface} "
         "after a sustained outage"
     )
-    run_command(["resolvectl", "flush-caches"], config.timeout)
-    run_command(["resolvectl", "reset-server-features"], config.timeout)
-    run_command(
+    network.command(["resolvectl", "flush-caches"], config.timeout)
+    network.command(["resolvectl", "reset-server-features"], config.timeout)
+    network.command(
         ["nmcli", "connection", "down", "uuid", connection_uuid],
         max(config.timeout, 15),
     )
-    interruptible_sleep(2)
-    result = run_command(
+    network.pause(2)
+    result = network.command(
         [
             "nmcli",
             "connection",
@@ -469,7 +513,14 @@ def recover_linux_network(config: Config) -> bool:
         log(f"network reconnect request failed for {connection}")
         return False
     log(f"network reconnect request completed for {connection}")
-    return True
+    deadline = time.monotonic() + max(config.timeout, 30)
+    while time.monotonic() < deadline and RUNNING:
+        if network_matches(config) and get_ipv4(config):
+            log(f"network {connection} has an IPv4 address after reconnect")
+            return True
+        network.pause(2)
+    log(f"network {connection} did not become ready after reconnect")
+    return False
 
 
 def linux_ipv4(interface: str) -> Optional[str]:
@@ -978,12 +1029,26 @@ def default_config_path() -> Path:
     return Path("/etc/campus-autologin/config.json")
 
 
+def diagnose(config: Config) -> int:
+    print(f"platform={platform.system()} {platform.release()}")
+    print(f"python={platform.python_version()}")
+    print(f"network={config.network_name} interface={config.interface or 'auto'}")
+    print(f"portal={config.portal['type']} connectivity_policy={config.connectivity_policy}")
+    print(f"ipv4={get_ipv4(config) or 'unavailable'}")
+    print(f"network_matches={network_matches(config)}")
+    print(f"internet_online={internet_online(build_opener(follow_redirects=False), config)}")
+    if platform.system() == "Linux":
+        print(f"nmcli={bool(run_command(['nmcli', '--version'], config.timeout))}")
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Campus network auto-login monitor")
     parser.add_argument("--config", type=Path, default=default_config_path())
     parser.add_argument("--check-config", action="store_true")
     parser.add_argument("--once", action="store_true", help="check once and log in immediately if offline")
     parser.add_argument("--log-file", type=Path)
+    parser.add_argument("--diagnose", action="store_true", help="print local diagnostics and exit")
     return parser.parse_args()
 
 
@@ -999,6 +1064,8 @@ def main() -> int:
     if args.check_config:
         log("configuration is valid")
         return 0
+    if args.diagnose:
+        return diagnose(config)
     signal.signal(signal.SIGTERM, stop_handler)
     signal.signal(signal.SIGINT, stop_handler)
     return run(config, once=args.once)

@@ -47,6 +47,7 @@ REMOTE_CHECKS = tuple(
 
 class ConnectivityConfig:
     connectivity_checks = REMOTE_CHECKS
+    connectivity_policy = "any"
     timeout = 6
 
 
@@ -208,7 +209,13 @@ def log(message: str) -> None:
         return
     try:
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        if LOG_FILE.exists() and LOG_FILE.stat().st_size >= 1_048_576:
+        if LOG_FILE.exists() and LOG_FILE.stat().st_size >= 2 * 1024 * 1024:
+            for index in (2, 1):
+                source = LOG_FILE.with_suffix(LOG_FILE.suffix + f".{index}")
+                target = LOG_FILE.with_suffix(LOG_FILE.suffix + f".{index + 1}")
+                if source.exists():
+                    target.unlink(missing_ok=True)
+                    source.replace(target)
             backup = LOG_FILE.with_suffix(LOG_FILE.suffix + ".1")
             backup.unlink(missing_ok=True)
             LOG_FILE.replace(backup)
@@ -695,7 +702,8 @@ def graphical_environment(environ: Optional[Mapping[str, str]] = None) -> dict[s
             if separator and key in allowed and value:
                 environment[key] = value
 
-    runtime_dir = environment.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    uid = getattr(os, "getuid", lambda: 0)()
+    runtime_dir = environment.setdefault("XDG_RUNTIME_DIR", f"/run/user/{uid}")
     if not environment.get("DISPLAY") and Path("/tmp/.X11-unix/X0").exists():
         environment["DISPLAY"] = ":0"
     authority = environment.get("XAUTHORITY", "")
@@ -823,7 +831,8 @@ def recover_app(app: RemoteApp, reason: str, allow_service_restart: bool) -> tup
 def acquire_lock() -> Optional[object]:
     if fcntl is None:
         return None
-    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", f"/tmp/{APP_NAME}-{os.getuid()}"))
+    uid = getattr(os, "getuid", lambda: 0)()
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", f"/tmp/{APP_NAME}-{uid}"))
     try:
         runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
         handle = (runtime / f"{APP_NAME}.lock").open("w", encoding="utf-8")

@@ -207,6 +207,7 @@ def build_config(args: argparse.Namespace, existing: dict[str, Any]) -> dict[str
         "connectivity_checks": existing.get(
             "connectivity_checks", list(campus_autologin.DEFAULT_CHECKS)
         ),
+        "connectivity_policy": str(existing.get("connectivity_policy", "any")),
     }
 
 
