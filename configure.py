@@ -12,6 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 import campus_autologin
 
@@ -93,6 +94,21 @@ def load_existing(path: Optional[Path]) -> dict[str, Any]:
     return campus_autologin.old_config_to_current(data)
 
 
+def portal_defaults(
+    previous: dict[str, Any], key: str, endpoint: str
+) -> dict[str, Any]:
+    def origin(value: str) -> tuple[str, Optional[str], int]:
+        url = urlsplit(value)
+        return url.scheme, url.hostname, url.port or (443 if url.scheme == "https" else 80)
+
+    try:
+        if previous.get(key) and origin(str(previous[key])) == origin(endpoint):
+            return dict(previous)
+    except ValueError:
+        pass
+    return {}
+
+
 def choose_portal(existing: dict[str, Any]) -> dict[str, Any]:
     current = existing.get("portal", {}) if isinstance(existing.get("portal"), dict) else {}
     current_type = current.get("type", "")
@@ -123,11 +139,12 @@ def choose_portal(existing: dict[str, Any]) -> dict[str, Any]:
             "account_prefix": previous.get("account_prefix", ",0,"),
         }
     if choice == "2":
-        prefix = previous.get("account_prefix", ",0,")
         url = ask(
             "登录 API 地址（通常以 /eportal/portal/login 结尾）",
             str(previous.get("login_url", "")),
         )
+        previous = portal_defaults(previous, "login_url", url)
+        prefix = previous.get("account_prefix", ",0,")
         prefix = ask(
             "账号字段前缀（多数 Dr.COM 为 ,0,；没有则输入 -）", str(prefix) if prefix else "-"
         )
@@ -139,10 +156,15 @@ def choose_portal(existing: dict[str, Any]) -> dict[str, Any]:
         }
     if choice == "3":
         print("提示：base URL 示例为 http://10.0.0.55，不要包含 /cgi-bin/get_challenge。")
+        base_url = ask("SRUN 认证服务器 base URL", str(previous.get("base_url", "")))
+        previous = portal_defaults(previous, "base_url", base_url)
+        if str(previous.get("base_url", "")).rstrip("/") != base_url.rstrip("/"):
+            previous.pop("challenge_url", None)
+            previous.pop("login_url", None)
         return {
             **previous,
             "type": "srun",
-            "base_url": ask("SRUN 认证服务器 base URL", str(previous.get("base_url", ""))),
+            "base_url": base_url,
             "ac_id": ask("AC ID", str(previous.get("ac_id", "1"))),
             "n": ask("n 参数", str(previous.get("n", "200"))),
             "type_value": ask("type 参数", str(previous.get("type_value", "1"))),
@@ -153,6 +175,8 @@ def choose_portal(existing: dict[str, Any]) -> dict[str, Any]:
             ),
         }
 
+    url = ask("登录请求 URL", str(previous.get("login_url", "")))
+    previous = portal_defaults(previous, "login_url", url)
     default_parameters = previous.get(
         "parameters", {"username": "{username}", "password": "{password}", "user_ip": "{ipv4}"}
     )
@@ -161,7 +185,7 @@ def choose_portal(existing: dict[str, Any]) -> dict[str, Any]:
     return {
         **previous,
         "type": "generic",
-        "login_url": ask("登录请求 URL", str(previous.get("login_url", ""))),
+        "login_url": url,
         "method": ask("请求方法 GET/POST", str(previous.get("method", "POST"))).upper(),
         "parameters": ask_json("请求参数 JSON 对象", default_parameters),
         "headers": ask_json("额外请求头 JSON 对象", previous.get("headers", {})),

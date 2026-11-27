@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import urllib.error
 import urllib.parse
+import urllib.request
 from pathlib import Path
 from contextlib import ExitStack
 from dataclasses import replace
@@ -346,6 +347,23 @@ class ProtocolTests(unittest.TestCase):
 
 
 class ConnectivityTests(unittest.TestCase):
+    def test_portal_redirect_limits_headers_to_the_configured_origin(self) -> None:
+        request = urllib.request.Request(
+            "https://campus.example:443/login", data=b"example=1",
+            headers={"X-Profile": "test", "Accept": "application/json", "User-Agent": "custom"},
+        )
+        handler = app.PortalRedirect()
+
+        same = handler.redirect_request(request, None, 302, "Found", {}, "https://campus.example/result")
+        self.assertEqual(same.get_header("X-profile"), "test")
+        self.assertEqual(same.get_header("User-agent"), "custom")
+        for url in ("https://status.example/result", "https://campus.example:444/result"):
+            with self.subTest(url=url):
+                crossed = handler.redirect_request(request, None, 302, "Found", {}, url)
+                self.assertIsNone(crossed.data)
+                self.assertEqual(dict(crossed.header_items()), {"User-agent": app.USER_AGENT, "Accept": "*/*"})
+        self.assertIsNone(handler.redirect_request(request, None, 302, "Found", {}, "http://campus.example/result"))
+
     def test_incomplete_responses_are_retryable_and_portal_bodies_are_not_logged(self) -> None:
         for portal in (
             {"type": "drcom", "login_url": "https://portal.test"},

@@ -43,6 +43,15 @@ class ConfigureWizardTests(unittest.TestCase):
                 for key, value in portal.items():
                     self.assertEqual(updated[key], value)
 
+    def test_new_portal_server_does_not_inherit_request_headers(self) -> None:
+        old = {"type": "generic", "login_url": "https://first.example/login",
+               "parameters": {"tenant": "original"}, "headers": {"Authorization": "fixture"}}
+        answers = ["", "https://second.example/login", "", "", "", "", ""]
+        with mock.patch("builtins.input", side_effect=answers), mock.patch("builtins.print"):
+            changed = configure.choose_portal({"portal": old})
+        self.assertEqual(changed["headers"], {})
+        self.assertNotIn("tenant", changed["parameters"])
+
     def test_write_failure_leaves_original_intact_and_no_staged_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory, "config.json")
