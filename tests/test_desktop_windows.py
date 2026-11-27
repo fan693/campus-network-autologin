@@ -167,14 +167,31 @@ class WindowsStatusTests(unittest.TestCase):
     def test_stage_acl_is_private_before_first_credential_write(self):
         with tempfile.TemporaryDirectory() as root:
             directory = Path(root, "stage")
-            windows.powershell(windows.PRIVATE_DIRECTORY, {"path": str(directory), "profile": True})
-            script = """
-$acl = Get-Acl -LiteralPath (Join-Path $request.path 'candidate')
+            # Only this empty synthetic fixture opts in to PowerShell diagnostics.
+            # Production operations can never put PowerShell stderr in user logs.
+            run = windows.subprocess.run
+
+            def fixture_run(*args, **kwargs):
+                result = run(*args, **kwargs)
+                if result.returncode:
+                    self.fail("Windows ACL fixture failed: " +
+                              result.stderr.decode("utf-8", errors="replace"))
+                return result
+
+            with mock.patch.object(windows.subprocess, "run", side_effect=fixture_run):
+                windows.powershell(windows.PRIVATE_DIRECTORY, {"path": str(directory), "profile": True})
+                candidate = directory / "candidate"
+                self.assertTrue(directory.is_dir(), "private staging directory was not created")
+                self.assertTrue(candidate.is_file(), "empty private candidate was not created")
+                self.assertEqual(candidate.stat().st_size, 0)
+                script = """
+$sections = [Security.AccessControl.AccessControlSections]::Access
+$acl = [IO.File]::GetAccessControl([string]$request.path, $sections)
+$sidType = [Security.Principal.SecurityIdentifier]
+$rules = $acl.GetAccessRules($true, $true, $sidType)
 $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
-$rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
-@{protected=$acl.AreAccessRulesProtected; current=($rules.Count -eq 1 -and
-    $rules[0].IdentityReference.Value -eq $me.Value)} | ConvertTo-Json -Compress
+$current = ($rules.Count -eq 1) -and ($rules[0].IdentityReference.Value -eq $me.Value)
+@{protected=$acl.AreAccessRulesProtected; current=$current} | ConvertTo-Json -Compress
 """
-            self.assertEqual(windows.powershell(script, {"path": str(directory)}),
-                             {"protected": True, "current": True})
-            self.assertEqual((directory / "candidate").stat().st_size, 0)
+                self.assertEqual(windows.powershell(script, {"path": str(candidate)}),
+                                 {"protected": True, "current": True})
